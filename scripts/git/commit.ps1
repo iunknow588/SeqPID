@@ -157,6 +157,22 @@ function Get-BranchSyncState {
         [string]$Branch
     )
 
+    $remoteRef = (git ls-remote --heads origin $Branch)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to inspect origin/$Branch before push."
+    }
+
+    if (-not $remoteRef) {
+        $localCommitCount = git rev-list --count $Branch
+        if ($LASTEXITCODE -ne 0 -or -not $localCommitCount) {
+            throw "Failed to count local commits for $Branch."
+        }
+        return @{
+            Behind = 0
+            Ahead  = [int]$localCommitCount.Trim()
+        }
+    }
+
     git fetch origin $Branch --quiet
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to fetch origin/$Branch before push."
