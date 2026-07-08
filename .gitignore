@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Rust
+target/
+**/target/
+
+# Local environments and secrets
+.env
+*.env
+!.env.example
+
+# Generated outputs
+比赛系统/reports/
+比赛系统/__pycache__/
+比赛系统/src/__pycache__/
+比赛系统/tests/**/__pycache__/
+back-info/src-rust-dotgit-backup-*/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

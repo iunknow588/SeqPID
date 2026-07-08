@@ -1,0 +1,34 @@
+capital_type_labels:
+  - 游资
+  - 量化
+  - 散户
+
+capital_intention_labels_fine:
+  - 买入
+  - 卖出
+  - 中性
+  - T0交易
+  - 吸筹
+  - 试盘
+  - 拉升
+  - 出货
+  - 对倒
+  - 做市
+
+capital_intention_labels_submit:
+  - 买入
+  - 卖出
+  - 中性
+  - T0交易
+
+pattern_labels_seed:
+  - 大单吸筹
+  - 日内套利
+  - 尾盘突袭
+  - 对倒拉升
+  - 压单吸货
+  - 集合竞价异动
+  - 分时脉冲
+  - 连续小单推升
+  - 盘中诱多
+  - 涨停板打开

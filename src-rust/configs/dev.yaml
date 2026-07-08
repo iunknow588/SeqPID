@@ -1,0 +1,18 @@
+process_count: 4
+window_minutes: 5
+use_reference_feature_file: true
+use_state_feature_engine: true
+baseline_mode: true
+pattern_distance_weights:
+  dtw: 0.5
+  wasserstein: 0.3
+  summary: 0.2
+pattern_low_conf_threshold: 0.15
+pattern_margin_threshold: 0.05
+capital_low_conf_threshold: 0.55
+intention_low_conf_threshold: 0.45
+label_mode: compressed
+enable_submit_zip: true
+enable_market_snapshot: true
+market_breadth_exclude_st: true
+market_breadth_exclude_new_listing_days: 60

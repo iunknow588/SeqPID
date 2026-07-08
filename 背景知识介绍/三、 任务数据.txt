@@ -1,0 +1,102 @@
+三、 任务数据
+
+参赛者可自行获取A股个股的逐笔委托、逐笔成交、逐笔撤单及十档盘口快照等数据。
+
+提示：可通过淘宝、闲鱼、百度网盘等公开渠道获取相关数据样本。
+
+为方便选手起步，我们提供一批基于Level-2数据构建的参考特征集，
+
+选手可基于这些特征开展模型设计。
+
+3.1参考特征集
+
+字段名	中文说明
+date	日期
+symbol	股票代码
+window_start	窗口开始时间
+window_end	窗口结束时间
+order_count	订单数量（委托笔数）
+order_count_all	所有订单数量（含撤单）
+cancel_count_all	撤单总笔数
+deal_count	成交笔数
+deal_amount	成交金额
+total_deal_amount_all	全部成交金额（总计）
+signal_deal_buy_amount	信号成交买入金额
+signal_deal_sell_amount	信号成交卖出金额
+oss_mega_amount_pct	超大单成交金额占比
+oss_mega_count_pct	超大单成交笔数占比
+oss_large_amount_pct	大单成交金额占比
+oss_large_count_pct	大单成交笔数占比
+oss_medium_amount_pct	中单成交金额占比
+oss_medium_count_pct	中单成交笔数占比
+oss_small_amount_pct	小单成交金额占比
+oss_small_count_pct	小单成交笔数占比
+oss_hot_money_count_pct	游资成交笔数占比
+oss_buy_amount_pct	主动买入金额占比（OSS分类）
+oss_sell_amount_pct	主动卖出金额占比（OSS分类）
+oss_mega_buy_pct	超大单中主动买入金额占比
+rs_interval_mean_ms	订单/成交间隔均值（毫秒）
+rs_interval_median_ms	订单/成交间隔中位数（毫秒）
+rs_interval_cv	订单/成交间隔变异系数
+rs_burst_ratio	订单/成交爆发比率
+rs_buy_interval_cv	买入订单间隔变异系数
+rs_sell_interval_cv	卖出订单间隔变异系数
+rs_split_similarity	订单拆分相似度
+rs_split_run_ratio	订单拆分连续运行比率
+cb_cancel_order_count	撤单笔数（特定行为统计）
+cb_cancel_order_ratio	撤单率（撤单笔数/总订单）
+cb_cancel_volume_ratio	撤单量占比（撤单股数/总申报股数）
+cb_cancel_amount_ratio	撤单金额占比（撤单金额/总申报金额）
+cb_fast_cancel_ratio	快速撤单占比
+cb_cancel_interval_cv	撤单间隔时间变异系数
+cb_buy_cancel_ratio	买入委托撤单率
+cb_sell_cancel_ratio	卖出委托撤单率
+ap_active_buy_pct	主动买入成交额占比
+ap_active_sell_pct	主动卖出成交额占比
+ap_active_net_direction	主动买卖净方向（净主动买入/卖出）
+ap_unilateral_intensity	主动成交单边强度
+ap_dominant_direction	主动成交主导方向（买/卖/均衡）
+ap_active_volume_pct	主动成交量占比
+ap_active_buy_run_max	最大连续主动买入成交笔数
+ap_active_sell_run_max	最大连续主动卖出成交笔数
+obp_at_best_bid_ratio	最优买价挂单占比
+obp_near_best_bid_ratio	靠近最优买价挂单占比
+obp_cross_spread_buy	穿越价差买入挂单情况（或次数）
+obp_avg_bid_offset	平均买单挂单价格偏移
+obp_at_best_ask_ratio	最优卖价挂单占比
+obp_near_best_ask_ratio	靠近最优卖价挂单占比
+obp_cross_spread_sell	穿越价差卖出挂单情况
+obp_avg_ask_offset	平均卖单挂单价格偏移
+pd_Q1_ratio	价格发现Q1比率（订单簿不平衡特征）
+pd_Q1_fast_ratio	价格发现Q1快速比率
+pd_Q2_ratio	价格发现Q2比率
+pd_Q2_order_count	价格发现Q2订单数量
+pd_Q3_cv	价格发现Q3变异系数
+pd_Q3_order_count	价格发现Q3订单数量
+pd_Q4_bid_ratio	价格发现Q4买方挂单比率
+pd_Q4_ask_ratio	价格发现Q4卖方挂单比率
+pd_Q5_deal_amount	价格发现Q5成交金额
+pd_Q5_impact	价格发现Q5冲击
+pd_Q5_mean_price	价格发现Q5均价
+pd_Q5_effective_threshold	价格发现Q5有效阈值
+pd_Q5_large_threshold	价格发现Q5大单阈值
+pd_H1_buy_pct	价格发现H1买入成交占比
+pd_H1_sell_pct	价格发现H1卖出成交占比
+pd_H1_uni	价格发现H1独特性/单一性指标
+pd_H1_deal_amount	价格发现H1成交金额
+pd_H1_mega_threshold	价格发现H1超大单阈值
+pd_H2_price_chg	价格发现H2价格变动
+pd_H3_cross_buy	价格发现H3穿越价差买入情况
+pd_H3_cross_sell	价格发现H3穿越价差卖出情况
+pd_H3_deal_amount	价格发现H3成交金额
+pd_H3_mega_threshold	价格发现H3超大单阈值
+pi_max_price_impact_pct	最大价格冲击百分比
+pi_price_std_pct	价格标准差百分比（波动率）
+pi_vwap_deviation	成交均价与VWAP偏离度
+pi_herfindahl_5min	5分钟成交集中度（赫芬达尔指数）
+pi_herfindahl_30min	30分钟成交集中度
+pi_peak_amount_ratio	成交量峰值比率
+pi_open_30min_amount_pct	开盘30分钟内成交额占比
+pi_close_10min_amount_pct	收盘前10分钟内成交额占比
+window_start_dt	窗口起始日期时间（精确）
+window_end_dt	窗口结束日期时间（精确）
