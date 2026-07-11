@@ -1,0 +1,4 @@
+﻿category,label,count,ratio
+pattern_type,日内套利,1,1.0
+capital_type,量化,1,1.0
+capital_intention,卖出,1,1.0

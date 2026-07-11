@@ -1,0 +1,26 @@
+{
+  "sample_count": 100,
+  "pattern_counts": {
+    "日内套利": 99,
+    "盘中诱多": 1
+  },
+  "capital_counts": {
+    "量化": 90,
+    "游资": 10
+  },
+  "intention_counts": {
+    "卖出": 68,
+    "买入": 32
+  },
+  "market_snapshot": {
+    "trade_date": "20260709",
+    "market_regime": "震荡中性",
+    "up_count": 0,
+    "down_count": 0,
+    "breadth_ratio": 0.0,
+    "breadth_balance": 0.0,
+    "p_median": -5.654493595744944e-06,
+    "i_median": 4.482919718201013e-05,
+    "d_median": 0.0005500814606029965
+  }
+}

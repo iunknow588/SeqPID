@@ -1,12 +1,17 @@
 ﻿mod capital_model;
+mod batch_alerts;
+mod batch_reporting;
 mod gui;
 mod config;
 mod exporter;
 mod market_pid;
+mod order_lifecycle;
 mod pattern_model;
+mod pid_decomposer;
 mod scheduler;
 mod schema_probe;
 mod schemas;
+mod state_feature_builder;
 
 use anyhow::Result;
 use chrono::Local;
@@ -164,6 +169,20 @@ pub fn resolve_input_dir(path_str: &str, trade_date: &str) -> PathBuf {
     base
 }
 
+fn resolve_stock_list_file(stock_list_file: Option<PathBuf>, resolved_input_dir: &Path) -> Option<PathBuf> {
+    if let Some(path) = stock_list_file {
+        return Some(path);
+    }
+    let candidates = [
+        resolved_input_dir.join("百只股票样本.csv"),
+        resolved_input_dir.parent().map(|p| p.join("百只股票样本.csv")).unwrap_or_default(),
+        PathBuf::from(EXTERNAL_ROOT).join("data").join("百只股票样本.csv"),
+    ];
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.exists() && candidate.is_file())
+}
+
 #[allow(dead_code)]
 fn infer_trade_date_from_path(path_str: &str) -> Result<String> {
     let path = Path::new(path_str);
@@ -221,6 +240,7 @@ fn run_batch(args: &Args) -> Result<()> {
     } else {
         Some(resolve_path(&args.stock_list_file))
     };
+    let stock_list_file = resolve_stock_list_file(stock_list_file, &resolved_input_dir);
     let enable_zip = config::get_bool(&cfg, "enable_submit_zip", false) || args.build_zip;
 
     let result = scheduler::run_daily_batch(
@@ -244,6 +264,11 @@ fn run_batch(args: &Args) -> Result<()> {
     }
     if args.stock_offset > 0 || args.stock_limit > 0 {
         println!("Slice: offset={}, limit={}", args.stock_offset, args.stock_limit);
+    }
+    if let Some(path) = stock_list_file.as_ref() {
+        if let Some(v) = result.get("stock_universe_size") {
+            println!("Stock list: {} ({} symbols)", path.display(), v);
+        }
     }
     if let Some(v) = result.get("warnings") {
         if let Some(arr) = v.as_array() {

@@ -20,6 +20,7 @@ class AnalysisApp:
 
         self.input_dir_var = tk.StringVar(value=str(main.DEFAULT_INPUT_DIR))
         self.output_dir_var = tk.StringVar(value=str(main.DEFAULT_OUTPUT_DIR))
+        self.stock_list_file_var = tk.StringVar(value=str(main.EXTERNAL_ROOT / "data" / "百只股票样本.csv"))
         self.detected_date_var = tk.StringVar(value="")
         self.profile_enabled_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="请选择样本目录和输出目录，然后点击“开始分析”。")
@@ -32,7 +33,7 @@ class AnalysisApp:
         frame = ttk.Frame(self.root, padding=16)
         frame.pack(fill=tk.BOTH, expand=True)
         frame.columnconfigure(1, weight=1)
-        frame.rowconfigure(3, weight=1)
+        frame.rowconfigure(4, weight=1)
 
         ttk.Label(frame, text="样本目录").grid(row=0, column=0, sticky="w", pady=(0, 10))
         input_entry = ttk.Entry(frame, textvariable=self.input_dir_var)
@@ -48,8 +49,12 @@ class AnalysisApp:
         ttk.Label(frame, textvariable=self.detected_date_var).grid(row=2, column=1, sticky="w", padx=(12, 8))
         ttk.Checkbutton(frame, text="生成性能报告", variable=self.profile_enabled_var).grid(row=2, column=2, sticky="e")
 
+        ttk.Label(frame, text="股票清单").grid(row=3, column=0, sticky="w", pady=(10, 0))
+        ttk.Entry(frame, textvariable=self.stock_list_file_var).grid(row=3, column=1, sticky="ew", padx=(12, 8), pady=(10, 0))
+        ttk.Button(frame, text="浏览", command=self._choose_stock_list_file).grid(row=3, column=2, sticky="ew", pady=(10, 0))
+
         log_frame = ttk.LabelFrame(frame, text="运行日志", padding=8)
-        log_frame.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=(16, 12))
+        log_frame.grid(row=4, column=0, columnspan=3, sticky="nsew", pady=(16, 12))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
 
@@ -60,7 +65,7 @@ class AnalysisApp:
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
         button_bar = ttk.Frame(frame)
-        button_bar.grid(row=4, column=0, columnspan=3, sticky="ew")
+        button_bar.grid(row=5, column=0, columnspan=3, sticky="ew")
         button_bar.columnconfigure(1, weight=1)
 
         self.run_button = ttk.Button(button_bar, text="开始分析", command=self._start_analysis)
@@ -77,6 +82,17 @@ class AnalysisApp:
         chosen = filedialog.askdirectory(initialdir=self.output_dir_var.get() or str(main.DEFAULT_OUTPUT_DIR))
         if chosen:
             self.output_dir_var.set(chosen)
+
+    def _choose_stock_list_file(self) -> None:
+        initial = self.stock_list_file_var.get().strip()
+        initial_dir = str(Path(initial).parent) if initial else str(main.DEFAULT_INPUT_DIR)
+        chosen = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            title="选择股票清单",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if chosen:
+            self.stock_list_file_var.set(chosen)
 
     def _refresh_detected_date(self) -> None:
         try:
@@ -102,11 +118,15 @@ class AnalysisApp:
 
         input_dir = self.input_dir_var.get().strip()
         output_dir = self.output_dir_var.get().strip()
+        stock_list_file = self.stock_list_file_var.get().strip()
         if not input_dir or not Path(input_dir).exists():
             messagebox.showerror("路径错误", "请选择有效的样本目录。")
             return
         if not output_dir:
             messagebox.showerror("路径错误", "请选择输出目录。")
+            return
+        if stock_list_file and not Path(stock_list_file).exists():
+            messagebox.showerror("路径错误", "请选择有效的股票清单，或清空该项。")
             return
 
         try:
@@ -117,17 +137,18 @@ class AnalysisApp:
 
         self._append_log(f"开始分析: {input_dir}")
         self._append_log(f"自动识别交易日: {trade_date}")
+        self._append_log(f"股票清单: {stock_list_file or '未指定'}")
         self.status_var.set("分析中，请稍候...")
         self._set_running(True)
 
         self.worker = threading.Thread(
             target=self._run_analysis_worker,
-            args=(input_dir, output_dir, self.profile_enabled_var.get()),
+            args=(input_dir, output_dir, stock_list_file, self.profile_enabled_var.get()),
             daemon=True,
         )
         self.worker.start()
 
-    def _run_analysis_worker(self, input_dir: str, output_dir: str, profile_enabled: bool) -> None:
+    def _run_analysis_worker(self, input_dir: str, output_dir: str, stock_list_file: str, profile_enabled: bool) -> None:
         def log(message: str) -> None:
             self.log_queue.put(("log", message))
 
@@ -135,6 +156,7 @@ class AnalysisApp:
             result = main.run_full_analysis(
                 input_dir=input_dir,
                 output_dir=output_dir,
+                stock_list_file=stock_list_file or None,
                 profile_enabled=profile_enabled,
                 logger=log,
             )

@@ -213,6 +213,10 @@ def run_batch_job(
         log(f"market_pid_snapshot: {result['market_snapshot_path']}")
     if result.get("market_report_path"):
         log(f"market_regime_report: {result['market_report_path']}")
+    if result.get("market_validation_report_path"):
+        log(f"market_pid_validation_report: {result['market_validation_report_path']}")
+    if result.get("replay_validation_report_path"):
+        log(f"100_stock_replay_report: {result['replay_validation_report_path']}")
     if result.get("diagnostics_json_path"):
         log(f"batch_diagnostics: {result['diagnostics_json_path']}")
     if result.get("distribution_csv_path"):
@@ -249,6 +253,7 @@ def run_full_analysis(
     input_dir: str | Path,
     output_dir: str | Path,
     report_dir: str | Path | None = None,
+    stock_list_file: str | Path | None = None,
     build_zip: bool = True,
     profile_enabled: bool = False,
     logger: LogFn | None = None,
@@ -260,6 +265,7 @@ def run_full_analysis(
         trade_date=trade_date,
         input_dir=input_dir,
         output_dir=output_dir,
+        stock_list_file=stock_list_file,
         build_zip=build_zip,
         profile_enabled=profile_enabled,
         logger=logger,

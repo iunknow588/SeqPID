@@ -53,11 +53,16 @@ class SchedulerTest(unittest.TestCase):
         )
 
         first_window = rows[0]
-        self.assertEqual(first_window["signed_large_active_amount"], 600000.0)
-        self.assertEqual(first_window["signed_mix_qr_amount"], -50000.0)
-        self.assertEqual(first_window["large_active_buy_amount"], 600000.0)
-        self.assertEqual(first_window["small_passive_buy_amount"], 100000.0)
-        self.assertEqual(first_window["small_passive_sell_amount"], 150000.0)
+        self.assertEqual(first_window["signed_large_active_amount"], 550000.0)
+        self.assertEqual(first_window["signed_mix_qr_amount"], 0.0)
+        self.assertEqual(first_window["CH_rule_t"], 550000.0)
+        self.assertEqual(first_window["Q_rule_t"], 0.0)
+        self.assertEqual(first_window["R_seed_t"], 0.0)
+        self.assertEqual(first_window["large_active_buy_amount"], 700000.0)
+        self.assertEqual(first_window["large_active_sell_amount"], 150000.0)
+        self.assertEqual(first_window["small_passive_buy_amount"], 0.0)
+        self.assertEqual(first_window["small_passive_sell_amount"], 0.0)
+        self.assertEqual(first_window["unknown_side_amount"], 200000.0)
         self.assertEqual(first_window["deal_amount"], 1050000.0)
 
     def test_build_pid_rows_uses_quote_to_infer_active_side(self) -> None:
@@ -94,10 +99,108 @@ class SchedulerTest(unittest.TestCase):
 
         first_window = rows[0]
         self.assertEqual(first_window["signed_large_active_amount"], 13200.0)
+        self.assertEqual(first_window["CH_rule_t"], 13200.0)
+        self.assertEqual(first_window["Q_rule_t"], 603000.0)
         self.assertEqual(first_window["large_active_buy_amount"], 612000.0)
         self.assertEqual(first_window["large_active_sell_amount"], 598800.0)
         self.assertEqual(first_window["signed_mix_qr_amount"], 603000.0)
         self.assertEqual(first_window["small_passive_buy_amount"], 603000.0)
+
+    def test_build_pid_rows_uses_order_age_for_passive_retail_seed(self) -> None:
+        rows = _build_pid_rows_from_trades(
+            [
+                {
+                    "time": "93600000",
+                    "price": "100",
+                    "volume": "1000",
+                    "side": "B",
+                    "sell_order_id": "S1",
+                }
+            ],
+            {"species_rules": {"large_order_amount_threshold": 500_000}},
+            quote_rows=[
+                {
+                    "time": "93600000",
+                    "bid_px_1": "99",
+                    "ask_px_1": "101",
+                }
+            ],
+            order_rows=[
+                {
+                    "time": "93000000",
+                    "order_id": "S1",
+                    "side": "S",
+                    "price": "100",
+                    "volume": "1000",
+                }
+            ],
+        )
+
+        first_window = rows[1]
+        self.assertEqual(first_window["R_seed_t"], 100000.0)
+        self.assertEqual(first_window["Q_rule_t"], 0.0)
+        self.assertEqual(first_window["order_age_recovered_count"], 1)
+        self.assertEqual(first_window["order_age_missing_count"], 0)
+
+    def test_signed_formula_fields_keep_sell_negative(self) -> None:
+        rows = _build_pid_rows_from_trades(
+            [
+                {
+                    "time": "93600000",
+                    "price": "100",
+                    "volume": "6000",
+                    "side": "S",
+                }
+            ],
+            {"species_rules": {"large_order_amount_threshold": 500_000}},
+            quote_rows=[
+                {
+                    "time": "93600000",
+                    "bid_px_1": "100",
+                    "ask_px_1": "101",
+                }
+            ],
+        )
+
+        first_window = rows[1]
+        self.assertEqual(first_window["CH_rule_t"], -600000.0)
+        self.assertEqual(first_window["signed_large_active_amount"], -600000.0)
+        self.assertEqual(first_window["large_active_sell_amount"], 600000.0)
+
+    def test_passive_retail_sell_keeps_r_seed_negative(self) -> None:
+        rows = _build_pid_rows_from_trades(
+            [
+                {
+                    "time": "93600000",
+                    "price": "100",
+                    "volume": "1000",
+                    "side": "S",
+                    "buy_order_id": "B1",
+                }
+            ],
+            {"species_rules": {"large_order_amount_threshold": 500_000}},
+            quote_rows=[
+                {
+                    "time": "93600000",
+                    "bid_px_1": "99",
+                    "ask_px_1": "101",
+                }
+            ],
+            order_rows=[
+                {
+                    "time": "93000000",
+                    "order_id": "B1",
+                    "side": "B",
+                    "price": "100",
+                    "volume": "1000",
+                }
+            ],
+        )
+
+        first_window = rows[1]
+        self.assertEqual(first_window["R_seed_t"], -100000.0)
+        self.assertEqual(first_window["signed_mix_qr_amount"], -100000.0)
+        self.assertEqual(first_window["small_passive_sell_amount"], 100000.0)
 
     def _write_csv_with_rows(self, path: Path, rows: list[dict[str, str]]) -> None:
         headers = list(ALL_ROW_GET_KEYS)
@@ -209,6 +312,10 @@ class SchedulerTest(unittest.TestCase):
             self.assertTrue((output_dir / "market_regime_report.md").exists())
             self.assertTrue((output_dir / "batch_diagnostics.json").exists())
             self.assertTrue((output_dir / "label_distribution.csv").exists())
+            self.assertTrue((output_dir / "reports" / "validation" / "market_pid_validation_report.md").exists())
+            self.assertTrue((output_dir / "reports" / "validation" / "100_stock_replay_report.md").exists())
+            self.assertTrue(Path(result["market_validation_report_path"]).exists())
+            self.assertTrue(Path(result["replay_validation_report_path"]).exists())
             self.assertIsNotNone(result["market_pid_snapshot"])
 
             with (output_dir / "predict_result.csv").open("r", encoding="utf-8-sig", newline="") as fh:
@@ -398,6 +505,12 @@ class SchedulerTest(unittest.TestCase):
                 rows = list(csv.reader(fh))
             self.assertEqual(len(rows), 3)
             self.assertEqual({row[0] for row in rows[1:]}, {"000001.SZ", "000002.SZ"})
+            imputed_pattern = next(item for item in result["pattern_results"] if item.stock_code == "000002.SZ")
+            imputed_predict = next(item for item in result["predict_results"] if item.stock_code == "000002.SZ")
+            self.assertTrue(imputed_pattern.prototype_id.startswith("imputed::"))
+            self.assertIn("缺失原始数据", imputed_pattern.pattern_explanation)
+            self.assertTrue(imputed_predict.debug_info["imputed_from_market_average"])
+            self.assertEqual(imputed_predict.debug_info["imputed_reason"], "missing_raw_data")
 
 
 if __name__ == "__main__":

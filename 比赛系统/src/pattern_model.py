@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from schemas import DailySample, PatternResult
 
 
@@ -16,7 +18,7 @@ def _clip01(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
-def predict_pattern(sample: DailySample, config: dict, label_dict: dict) -> PatternResult:
+def predict_pattern(sample: DailySample, config: dict, label_dict: dict, pid_result: Any | None = None) -> PatternResult:
     del label_dict
     summary = sample.feature_summary
 
@@ -38,13 +40,14 @@ def predict_pattern(sample: DailySample, config: dict, label_dict: dict) -> Patt
 
     forced_label = _detect_obvious_pattern(summary)
     if forced_label:
+        label = refine_pattern_with_pid(forced_label, summary, pid_result)
         return PatternResult(
             stock_code=sample.stock_code,
             transaction_date=sample.transaction_date,
-            pattern_type=forced_label,
-            pattern_explanation=render_pattern_explanation(forced_label, summary),
+            pattern_type=label,
+            pattern_explanation=render_pattern_explanation(label, summary),
             pattern_score=0.86,
-            prototype_id=f"rule::{forced_label}",
+            prototype_id=f"rule_pid::{label}" if label != forced_label else f"rule::{label}",
         )
 
     amount_score = _clip01(deal_amount / 1_000_000_000.0)
@@ -90,14 +93,62 @@ def predict_pattern(sample: DailySample, config: dict, label_dict: dict) -> Patt
         label = fallback_pattern_rule(summary)
         score = max(score, 0.18)
 
+    refined_label = refine_pattern_with_pid(label, summary, pid_result)
+    if refined_label != label:
+        score = min(0.93, max(score, 0.62))
+
     return PatternResult(
         stock_code=sample.stock_code,
         transaction_date=sample.transaction_date,
-        pattern_type=label,
-        pattern_explanation=render_pattern_explanation(label, summary),
+        pattern_type=refined_label,
+        pattern_explanation=render_pattern_explanation(refined_label, summary),
         pattern_score=round(score, 4),
-        prototype_id=f"baseline::{label}",
+        prototype_id=f"baseline_pid::{refined_label}" if refined_label != label else f"baseline::{label}",
     )
+
+
+def refine_pattern_with_pid(label: str, summary: dict, pid_result: Any | None) -> str:
+    if pid_result is None:
+        return label
+
+    dominant_type = str(getattr(pid_result, "dominant_type", ""))
+    dominant_intention = str(getattr(pid_result, "dominant_intention", ""))
+    hot_money_ratio = _to_float(getattr(pid_result, "hot_money_ratio", 0.0))
+    quant_ratio = _to_float(getattr(pid_result, "quant_ratio", 0.0))
+    damping_mean = abs(_to_float(getattr(pid_result, "damping_mean", 0.0)))
+    inertia_mean = abs(_to_float(getattr(pid_result, "inertia_mean", 0.0)))
+    close_return = _to_float(summary.get("close_return"))
+    intraday_range = _to_float(summary.get("intraday_range"))
+    close_strength = _to_float(summary.get("close_strength"))
+    burst_ratio = _to_float(summary.get("burst_ratio"))
+    tail_ratio = _to_float(summary.get("tail_ratio"))
+
+    # PID 在这里作为形态的二次判别：价格形态给候选，PID 贡献度决定候选更像哪类行为。
+    if dominant_type == "游资" and dominant_intention == "买入" and hot_money_ratio >= 0.34:
+        if close_return >= 0.018 and close_strength >= 0.55:
+            return "大单吸筹"
+        if intraday_range >= 0.025 or burst_ratio >= 0.18:
+            return "对倒拉升"
+
+    if dominant_type == "游资" and dominant_intention == "卖出" and close_strength <= 0.48:
+        return "盘中诱多"
+
+    if dominant_type == "量化" and quant_ratio >= 0.38:
+        if intraday_range >= 0.025 and abs(close_return) <= 0.015:
+            return "日内套利"
+        if damping_mean >= 0.05 and burst_ratio >= 0.12:
+            return "分时脉冲"
+
+    if dominant_intention == "卖出" and close_return < -0.018 and close_strength <= 0.45:
+        return "盘中诱多"
+
+    if dominant_intention == "买入" and tail_ratio >= 0.10 and close_strength >= 0.65:
+        return "尾盘突袭"
+
+    if inertia_mean >= 0.20 and damping_mean < 0.03 and close_return > 0.01:
+        return "连续小单推升"
+
+    return label
 
 
 def _detect_obvious_pattern(summary: dict) -> str | None:

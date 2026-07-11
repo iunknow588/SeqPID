@@ -1,0 +1,93 @@
+{
+  "total_seconds": 395.443418,
+  "sample_build_seconds": 393.217448,
+  "pattern_seconds": 0.002088,
+  "capital_seconds": 1.047689,
+  "market_seconds": 0.002707,
+  "export_seconds": 0.036941,
+  "processed_samples": 100,
+  "imputed_missing_symbols": 0,
+  "skipped_incomplete_samples": 0,
+  "top_slowest_samples": [
+    {
+      "stock_code": "601991.SH",
+      "sample_build_seconds": 29.444948
+    },
+    {
+      "stock_code": "600172.SH",
+      "sample_build_seconds": 28.82104
+    },
+    {
+      "stock_code": "688008.SH",
+      "sample_build_seconds": 15.553061
+    },
+    {
+      "stock_code": "603538.SH",
+      "sample_build_seconds": 14.695794
+    },
+    {
+      "stock_code": "601872.SH",
+      "sample_build_seconds": 14.349591
+    },
+    {
+      "stock_code": "601398.SH",
+      "sample_build_seconds": 12.469369
+    },
+    {
+      "stock_code": "600396.SH",
+      "sample_build_seconds": 12.231052
+    },
+    {
+      "stock_code": "600186.SH",
+      "sample_build_seconds": 10.372835
+    },
+    {
+      "stock_code": "603399.SH",
+      "sample_build_seconds": 9.98773
+    },
+    {
+      "stock_code": "600330.SH",
+      "sample_build_seconds": 9.852837
+    },
+    {
+      "stock_code": "603005.SH",
+      "sample_build_seconds": 9.746254
+    },
+    {
+      "stock_code": "603601.SH",
+      "sample_build_seconds": 9.744541
+    },
+    {
+      "stock_code": "603118.SH",
+      "sample_build_seconds": 8.82292
+    },
+    {
+      "stock_code": "600726.SH",
+      "sample_build_seconds": 8.670963
+    },
+    {
+      "stock_code": "603893.SH",
+      "sample_build_seconds": 7.743279
+    },
+    {
+      "stock_code": "601328.SH",
+      "sample_build_seconds": 7.197913
+    },
+    {
+      "stock_code": "600203.SH",
+      "sample_build_seconds": 6.883682
+    },
+    {
+      "stock_code": "605006.SH",
+      "sample_build_seconds": 6.854063
+    },
+    {
+      "stock_code": "603773.SH",
+      "sample_build_seconds": 6.322581
+    },
+    {
+      "stock_code": "600578.SH",
+      "sample_build_seconds": 6.187981
+    }
+  ]
+}

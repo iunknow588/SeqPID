@@ -1,0 +1,13 @@
+﻿category,label,count,ratio
+pattern_type,日内套利,35,0.35
+pattern_type,对倒拉升,27,0.27
+pattern_type,盘中诱多,24,0.24
+pattern_type,分时脉冲,7,0.07
+pattern_type,尾盘突袭,5,0.05
+pattern_type,压单吸货,1,0.01
+pattern_type,大单吸筹,1,0.01
+capital_type,量化,58,0.58
+capital_type,游资,26,0.26
+capital_type,散户,16,0.16
+capital_intention,卖出,71,0.71
+capital_intention,买入,29,0.29

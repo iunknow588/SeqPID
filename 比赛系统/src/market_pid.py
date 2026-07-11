@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from statistics import mean, median, pstdev
+from typing import Any
 
 from schemas import DailySample, MarketPidSnapshot, PatternResult, PredictResult
 
@@ -35,6 +36,57 @@ def _clamp(value: float, lower: float = -1.0, upper: float = 1.0) -> float:
     return max(lower, min(upper, value))
 
 
+def _tail_or_mean(values: Any) -> float:
+    try:
+        iterable = list(values)
+    except TypeError:
+        return 0.0
+    for value in reversed(iterable):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if numeric == numeric and abs(numeric) > 1e-12:
+            return numeric
+    finite_values: list[float] = []
+    for value in iterable:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if numeric == numeric:
+            finite_values.append(numeric)
+    return _safe_mean(finite_values)
+
+
+def _series_has_signal(values: Any) -> bool:
+    try:
+        iterable = list(values)
+    except TypeError:
+        return False
+    for value in iterable:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if numeric == numeric:
+            return True
+    return False
+
+
+def _extract_market_pid_values(pid_result: Any) -> tuple[float, float, float] | None:
+    c_p = getattr(pid_result, "c_p", None)
+    c_i = getattr(pid_result, "c_i", None)
+    c_d = getattr(pid_result, "c_d", None)
+    if not (_series_has_signal(c_p) and _series_has_signal(c_i) and _series_has_signal(c_d)):
+        return None
+    return (
+        _clamp(_tail_or_mean(c_p)),
+        _clamp(_tail_or_mean(c_i)),
+        _clamp(abs(_tail_or_mean(c_d)), 0.0, 1.0),
+    )
+
+
 def _regime_from_scores(breadth_balance: float, p_median: float, i_median: float, d_median: float) -> str:
     if breadth_balance > 0.30 and p_median > 0.10 and i_median > 0.20:
         return REGIME_STRONG_UP
@@ -51,6 +103,7 @@ def _regime_from_scores(breadth_balance: float, p_median: float, i_median: float
 
 def estimate_market_pid(
     samples: list[DailySample],
+    pid_results: dict[str, Any] | None,
     pattern_results: list[PatternResult],
     predict_results: list[PredictResult],
     config: dict,
@@ -61,6 +114,9 @@ def estimate_market_pid(
     d_values: list[float] = []
     up_count = 0
     down_count = 0
+    pid_result_source_count = 0
+    heuristic_fallback_source_count = 0
+    pid_component_source_count = 0
 
     pattern_counts: dict[str, int] = {}
     capital_counts: dict[str, int] = {}
@@ -82,13 +138,25 @@ def estimate_market_pid(
         bid_support = float(summary.get("bid_support", 0.0))
         ask_pressure = float(summary.get("ask_pressure", 0.0))
 
-        p_value = _clamp(net_direction * 0.6 + min(price_impact / 0.02, 1.0) * 0.25 + tail_ratio * 0.15)
-        i_value = _clamp(burst_ratio * 0.55 + max(net_direction, 0.0) * 0.25 + tail_ratio * 0.20)
-        d_value = _clamp(
-            cancel_ratio * 0.50 + max(ask_pressure - bid_support, 0.0) * 0.30 + (1.0 - abs(net_direction)) * 0.20,
-            0.0,
-            1.0,
-        )
+        pid_result = (pid_results or {}).get(sample.stock_code)
+        pid_values = _extract_market_pid_values(pid_result) if pid_result is not None else None
+        if pid_values is not None:
+            p_value, i_value, d_value = pid_values
+            pid_result_source_count += 1
+            pid_component_source_count += 1
+            sample.quality_flags["market_pid_from_pid_result"] = True
+            sample.quality_flags["market_pid_source"] = "pid_components"
+        else:
+            p_value = _clamp(net_direction * 0.6 + min(price_impact / 0.02, 1.0) * 0.25 + tail_ratio * 0.15)
+            i_value = _clamp(burst_ratio * 0.55 + max(net_direction, 0.0) * 0.25 + tail_ratio * 0.20)
+            d_value = _clamp(
+                cancel_ratio * 0.50 + max(ask_pressure - bid_support, 0.0) * 0.30 + (1.0 - abs(net_direction)) * 0.20,
+                0.0,
+                1.0,
+            )
+            heuristic_fallback_source_count += 1
+            sample.quality_flags["market_pid_from_pid_result"] = False
+            sample.quality_flags["market_pid_source"] = "heuristic_fallback"
 
         summary["p_value"] = p_value
         summary["i_value"] = i_value
@@ -143,6 +211,9 @@ def estimate_market_pid(
         ),
         diagnostics={
             "sample_count": len(samples),
+            "pid_result_source_count": pid_result_source_count,
+            "pid_component_source_count": pid_component_source_count,
+            "heuristic_fallback_source_count": heuristic_fallback_source_count,
             "pattern_counts": pattern_counts,
             "capital_counts": capital_counts,
             "intention_counts": intention_counts,
@@ -185,5 +256,6 @@ def attach_market_relative_metrics(
                 "d_rel_market": round(d_rel, 4),
                 "trend_vs_market": trend_vs_market,
                 "market_regime": snapshot.market_regime,
+                "market_pid_source": str(sample.quality_flags.get("market_pid_source", "heuristic_fallback")),
             }
         )

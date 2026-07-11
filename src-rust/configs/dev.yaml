@@ -3,6 +3,8 @@ window_minutes: 5
 use_reference_feature_file: true
 use_state_feature_engine: true
 baseline_mode: true
+pid_decomposer:
+  mode: baseline_4d
 pattern_distance_weights:
   dtw: 0.5
   wasserstein: 0.3

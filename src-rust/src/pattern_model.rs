@@ -1,4 +1,5 @@
-﻿use crate::schemas::{DailySample, PatternResult};
+use crate::schemas::{DailySample, DecompositionResult, PatternResult};
+use std::collections::HashMap;
 
 fn to_float(value: Option<&f64>, default: f64) -> f64 {
     value.copied().unwrap_or(default)
@@ -8,7 +9,7 @@ fn clip01(value: f64) -> f64 {
     value.clamp(0.0, 1.0)
 }
 
-fn detect_obvious_pattern(summary: &std::collections::HashMap<String, f64>) -> Option<String> {
+fn detect_obvious_pattern(summary: &HashMap<String, f64>) -> Option<&'static str> {
     let deal_amount = to_float(summary.get("deal_amount"), 0.0);
     let close_return = to_float(summary.get("close_return"), 0.0);
     let open_return = to_float(summary.get("open_return"), 0.0);
@@ -20,30 +21,100 @@ fn detect_obvious_pattern(summary: &std::collections::HashMap<String, f64>) -> O
     let order_buy_ratio = to_float(summary.get("order_buy_ratio"), 0.5);
 
     if close_return >= 0.035 && close_strength >= 0.62 && deal_amount >= 300_000_000.0 {
-        return Some("大单吸筹".into());
+        Some("大单吸筹")
+    } else if close_return >= 0.012 && close_strength >= 0.58 && avg_trade_size <= 8500.0 && order_buy_ratio >= 0.53 {
+        Some("连续小单推升")
+    } else if last15_return >= 0.0025 && tail_ratio >= 0.10 && close_strength >= 0.68 {
+        Some("尾盘突袭")
+    } else if open_return <= -0.008 && close_return >= 0.008 && close_strength >= 0.60 {
+        Some("压单吸货")
+    } else if open_return >= 0.008 && close_return <= -0.012 && close_strength <= 0.35 {
+        Some("盘中诱多")
+    } else if close_return <= -0.025 && close_strength <= 0.28 {
+        Some("盘中诱多")
+    } else if close_return.abs() <= 0.012 && intraday_range >= 0.035 {
+        Some("日内套利")
+    } else {
+        None
     }
-    if close_return >= 0.012 && close_strength >= 0.58 && avg_trade_size <= 8500.0 && order_buy_ratio >= 0.53 {
-        return Some("连续小单推升".into());
-    }
-    if last15_return >= 0.0025 && tail_ratio >= 0.10 && close_strength >= 0.68 {
-        return Some("尾盘突袭".into());
-    }
-    if open_return <= -0.008 && close_return >= 0.008 && close_strength >= 0.60 {
-        return Some("压单吸货".into());
-    }
-    if open_return >= 0.008 && close_return <= -0.012 && close_strength <= 0.35 {
-        return Some("盘中诱多".into());
-    }
-    if close_return <= -0.025 && close_strength <= 0.28 {
-        return Some("盘中诱多".into());
-    }
-    if close_return.abs() <= 0.012 && intraday_range >= 0.035 {
-        return Some("日内套利".into());
-    }
-    None
 }
 
-fn render_pattern_explanation(label: &str) -> &'static str {
+fn fallback_pattern_rule(summary: &HashMap<String, f64>) -> &'static str {
+    let close_return = to_float(summary.get("close_return"), 0.0);
+    let open_return = to_float(summary.get("open_return"), 0.0);
+    let intraday_range = to_float(summary.get("intraday_range"), 0.0);
+    let close_strength = to_float(summary.get("close_strength"), 0.0);
+    let order_buy_ratio = to_float(summary.get("order_buy_ratio"), 0.5);
+    let avg_trade_size = to_float(summary.get("avg_trade_size"), 0.0);
+    let last15_return = to_float(summary.get("last15_return"), 0.0);
+
+    if last15_return > 0.0025 && close_strength > 0.7 {
+        "尾盘突袭"
+    } else if close_return > 0.03 && close_strength > 0.85 {
+        "大单吸筹"
+    } else if close_return > 0.01 && avg_trade_size < 8000.0 && order_buy_ratio > 0.52 {
+        "连续小单推升"
+    } else if close_return.abs() < 0.015 && intraday_range > 0.035 {
+        "日内套利"
+    } else if open_return < -0.01 && close_return > 0.008 && close_strength > 0.65 {
+        "压单吸货"
+    } else if open_return > 0.008 && close_return < -0.01 && close_strength < 0.35 {
+        "盘中诱多"
+    } else if close_return < -0.02 && close_strength < 0.35 {
+        "盘中诱多"
+    } else {
+        "分时脉冲"
+    }
+}
+
+fn refine_pattern_with_pid(label: &str, summary: &HashMap<String, f64>, pid_result: Option<&DecompositionResult>) -> String {
+    let Some(pid_result) = pid_result else {
+        return label.to_string();
+    };
+    let dominant_type = pid_result.dominant_type.as_str();
+    let dominant_intention = pid_result.dominant_intention.as_str();
+    let hot_money_ratio = pid_result.hot_money_ratio;
+    let quant_ratio = pid_result.quant_ratio;
+    let damping_mean = pid_result.damping_mean.abs();
+    let inertia_mean = pid_result.inertia_mean.abs();
+    let close_return = to_float(summary.get("close_return"), 0.0);
+    let intraday_range = to_float(summary.get("intraday_range"), 0.0);
+    let close_strength = to_float(summary.get("close_strength"), 0.0);
+    let burst_ratio = to_float(summary.get("burst_ratio"), 0.0);
+    let tail_ratio = to_float(summary.get("tail_ratio"), 0.0);
+
+    if dominant_type == "游资" && dominant_intention == "买入" && hot_money_ratio >= 0.34 {
+        if close_return >= 0.018 && close_strength >= 0.55 {
+            return "大单吸筹".to_string();
+        }
+        if intraday_range >= 0.025 || burst_ratio >= 0.18 {
+            return "对倒拉升".to_string();
+        }
+    }
+    if dominant_type == "游资" && dominant_intention == "卖出" && close_strength <= 0.48 {
+        return "盘中诱多".to_string();
+    }
+    if dominant_type == "量化" && quant_ratio >= 0.38 {
+        if intraday_range >= 0.025 && close_return.abs() <= 0.015 {
+            return "日内套利".to_string();
+        }
+        if damping_mean >= 0.05 && burst_ratio >= 0.12 {
+            return "分时脉冲".to_string();
+        }
+    }
+    if dominant_intention == "卖出" && close_return < -0.018 && close_strength <= 0.45 {
+        return "盘中诱多".to_string();
+    }
+    if dominant_intention == "买入" && tail_ratio >= 0.10 && close_strength >= 0.65 {
+        return "尾盘突袭".to_string();
+    }
+    if inertia_mean >= 0.20 && damping_mean < 0.03 && close_return > 0.01 {
+        return "连续小单推升".to_string();
+    }
+    label.to_string()
+}
+
+pub fn render_pattern_explanation(label: &str) -> &'static str {
     match label {
         "尾盘突袭" => "尾盘最后一段成交明显放大，股价临近收盘快速抬升，带有集中做强收盘的意味。",
         "大单吸筹" => "全天维持偏强上攻，成交额与单笔成交偏大，像是主导资金持续承接并主动推高。",
@@ -59,45 +130,29 @@ fn render_pattern_explanation(label: &str) -> &'static str {
     }
 }
 
-fn fallback_pattern_rule(summary: &std::collections::HashMap<String, f64>) -> String {
-    let close_return = to_float(summary.get("close_return"), 0.0);
-    let open_return = to_float(summary.get("open_return"), 0.0);
-    let intraday_range = to_float(summary.get("intraday_range"), 0.0);
-    let close_strength = to_float(summary.get("close_strength"), 0.0);
-    let order_buy_ratio = to_float(summary.get("order_buy_ratio"), 0.5);
-    let avg_trade_size = to_float(summary.get("avg_trade_size"), 0.0);
-    let last15_return = to_float(summary.get("last15_return"), 0.0);
-
-    if last15_return > 0.0025 && close_strength > 0.7 {
-        return "尾盘突袭".into();
-    }
-    if close_return > 0.03 && close_strength > 0.85 {
-        return "大单吸筹".into();
-    }
-    if close_return > 0.01 && avg_trade_size < 8000.0 && order_buy_ratio > 0.52 {
-        return "连续小单推升".into();
-    }
-    if close_return.abs() < 0.015 && intraday_range > 0.035 {
-        return "日内套利".into();
-    }
-    if open_return < -0.01 && close_return > 0.008 && close_strength > 0.65 {
-        return "压单吸货".into();
-    }
-    if open_return > 0.008 && close_return < -0.01 && close_strength < 0.35 {
-        return "盘中诱多".into();
-    }
-    if close_return < -0.02 && close_strength < 0.35 {
-        return "盘中诱多".into();
-    }
-    "分时脉冲".into()
-}
-
 pub fn predict_pattern(
     sample: &DailySample,
-    config: &std::collections::HashMap<String, serde_yaml::Value>,
-    _label_dict: &std::collections::HashMap<String, serde_yaml::Value>,
+    config: &HashMap<String, serde_yaml::Value>,
+    _label_dict: &HashMap<String, serde_yaml::Value>,
+    pid_result: Option<&DecompositionResult>,
 ) -> PatternResult {
     let summary = &sample.feature_summary;
+
+    if let Some(forced_label) = detect_obvious_pattern(summary) {
+        let refined = refine_pattern_with_pid(forced_label, summary, pid_result);
+        return PatternResult {
+            stock_code: sample.stock_code.clone(),
+            transaction_date: sample.transaction_date.clone(),
+            pattern_type: refined.clone(),
+            pattern_explanation: render_pattern_explanation(&refined).to_string(),
+            pattern_score: 0.86,
+            prototype_id: if refined == forced_label {
+                format!("rule::{}", refined)
+            } else {
+                format!("rule_pid::{}", refined)
+            },
+        };
+    }
 
     let deal_amount = to_float(summary.get("deal_amount"), 0.0);
     let close_return = to_float(summary.get("close_return"), 0.0);
@@ -114,17 +169,6 @@ pub fn predict_pattern(
     let order_buy_ratio = to_float(summary.get("order_buy_ratio"), 0.5);
     let directional_efficiency = to_float(summary.get("directional_efficiency"), 0.0);
     let reversal_strength = to_float(summary.get("reversal_strength"), 0.0);
-
-    if let Some(forced) = detect_obvious_pattern(summary) {
-        return PatternResult {
-            stock_code: sample.stock_code.clone(),
-            transaction_date: sample.transaction_date.clone(),
-            pattern_type: forced.clone(),
-            pattern_explanation: render_pattern_explanation(&forced).to_string(),
-            pattern_score: 0.86,
-            prototype_id: format!("rule::{}", forced),
-        };
-    }
 
     let amount_score = clip01(deal_amount / 1_000_000_000.0);
     let range_score = clip01(intraday_range / 0.08);
@@ -145,7 +189,7 @@ pub fn predict_pattern(
     let reversal_up_score = clip01(reversal_strength / 0.03);
     let reversal_down_score = clip01(-reversal_strength / 0.03);
 
-    let mut candidates: Vec<(&str, f64)> = vec![
+    let mut candidates = vec![
         ("尾盘突袭", tail_up_score * 0.34 + tail_flow_score * 0.22 + close_top_score * 0.22 + up_score * 0.12 + amount_score * 0.10),
         ("大单吸筹", up_score * 0.25 + buy_bias_score * 0.20 + close_top_score * 0.20 + large_order_score * 0.20 + amount_score * 0.15),
         ("日内套利", range_score * 0.35 + neutral_close_score * 0.30 + mid_close_score * 0.20 + (1.0 - (order_buy_ratio - 0.5).abs() / 0.2) * 0.15),
@@ -157,37 +201,38 @@ pub fn predict_pattern(
         ("盘中诱多", down_score * 0.26 + close_bottom_score * 0.24 + range_score * 0.18 + reversal_down_score * 0.18 + sell_bias_score * 0.14),
         ("涨停板打开", up_score * 0.22 + range_score * 0.22 + close_top_score * 0.16 + amount_score * 0.16 + tail_down_score * 0.14 + burst_ratio * 0.10),
     ];
-
     candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    let (label, score) = candidates[0];
-    let second_score = if candidates.len() > 1 { candidates[1].1 } else { 0.0 };
+    let (mut label, mut score) = (candidates[0].0, candidates[0].1);
+    let second_score = candidates.get(1).map(|item| item.1).unwrap_or(0.0);
     let margin = score - second_score;
-
-    let low_conf = config.get("pattern_low_conf_threshold")
+    let low_conf = config
+        .get("pattern_low_conf_threshold")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.15);
-    let margin_thresh = config.get("pattern_margin_threshold")
+    let margin_thresh = config
+        .get("pattern_margin_threshold")
         .and_then(|v| v.as_f64())
-        .unwrap_or(0.05);
-
+        .unwrap_or(0.04);
     if score < low_conf || margin < margin_thresh {
-        let fallback = fallback_pattern_rule(summary);
-        return PatternResult {
-            stock_code: sample.stock_code.clone(),
-            transaction_date: sample.transaction_date.clone(),
-            pattern_type: fallback.clone(),
-            pattern_explanation: render_pattern_explanation(&fallback).to_string(),
-            pattern_score: low_conf,
-            prototype_id: format!("fallback::{}", fallback),
-        };
+        label = fallback_pattern_rule(summary);
+        score = score.max(0.18);
+    }
+
+    let refined_label = refine_pattern_with_pid(label, summary, pid_result);
+    if refined_label != label {
+        score = score.max(0.62).min(0.93);
     }
 
     PatternResult {
         stock_code: sample.stock_code.clone(),
         transaction_date: sample.transaction_date.clone(),
-        pattern_type: label.to_string(),
-        pattern_explanation: render_pattern_explanation(label).to_string(),
+        pattern_type: refined_label.clone(),
+        pattern_explanation: render_pattern_explanation(&refined_label).to_string(),
         pattern_score: (score * 10000.0).round() / 10000.0,
-        prototype_id: format!("scorer::{}", label),
+        prototype_id: if refined_label == label {
+            format!("baseline::{}", refined_label)
+        } else {
+            format!("baseline_pid::{}", refined_label)
+        },
     }
 }

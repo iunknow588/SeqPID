@@ -1,177 +1,270 @@
 # 天池赛题一：比赛系统建设 Check List
 
-**版本：** V1.3  
-**日期：** 2026-07-06  
-**文档定位：** 当前实现状态核对版  
+**版本：** V1.6  
+**日期：** 2026-07-11  
+**文档定位：** 重构准备与实现闭环核对版  
 **适用范围：**
-- `比赛概要设计说明书.md` V1.2
-- `比赛详细设计说明书.md` V1.3
+
+- `比赛概要设计说明书.md` V1.3
+- `比赛详细设计说明书.md` V1.4
+- `算法设计.md` V1.3
+- `统一资金类型判断规范.md` V1.1
+- `PID原理与实现.md` V1.1
 - `比赛系统/` 当前代码实现
-- `比赛设计文档/back/天池赛题设计可行性分析_2026-07-06.md`
+
+---
+
+## 0. 本轮修正结论
+
+当前系统已具备可运行基线，但代码结构仍是“可提交优先”的形态：`scheduler.py` 承载了数据读取、窗口聚合、样本构建、缺失补位、调度导出等多类职责；PID 分解层现已按“入口选择器 + shared 公共骨架 + 4D 独立实现 + 5D 独立实现”拆分，但周边文档、清单和少量调用说明仍需收口到同一口径。
+
+本轮后续重构目标不是推翻基线，而是把现有能力拆成与 V1.4 详细设计一致的模块边界，并优先保证：
+
+1. 输出文件不变：`pattern_reco.csv`、`predict_result.csv`、`submit.zip`。
+2. 主入口不变：`main.py` 可继续运行。
+3. 规则/PID 口径统一：`CH_rule / Q_rule / R_seed` 只作为规则流，`capital_ch / capital_q / capital_retail` 只来自 PID 外力贡献 `beta_* U_*`。
+4. `phi / theta` 只作为系统响应与状态诊断，不反解为某一类资金身份。
+5. 默认稳健运行态为 `baseline_4d`，5 维模式仅在输入质量、D 项有效性与可辨识性验证通过后启用。
+6. 先做低风险模块拆分，再做弱监督模型和聚类原型库升级。
 
 ---
 
 ## 1. 文档一致性检查
 
-| 检查项 | 目标状态 | 当前状态 |
-|---|---|---|
-| 比赛概要设计版本 | V1.2 | `已确认` |
-| 比赛详细设计版本 | V1.3 | `本次更新` |
-| 可行性分析报告位置 | 归档到 `back/`，不再作为主线文档 | `已完成` |
-| Task 1 输出文件名 | `pattern_reco.csv` | `已实现` |
-| Task 2 输出文件名 | `predict_result.csv` | `已实现` |
-| 市场状态输出文件 | `market_pid_snapshot.csv` / `market_regime_report.md` | `已实现` |
-| 启动入口 | `main.py` | `已实现` |
-| 输出目录规则 | 统一输出到 `E:\2026OPC大赛\自动化交易\output\交易日_时间戳\` | `已实现` |
-| 股票清单模式 | 支持按 100 股样本清单过滤与排序 | `已实现` |
-| 缺失股票补位 | 名单股票缺失原始数据时补默认行并告警 | `已实现` |
-
----
-
-## 2. 编码前闭环检查
-
-### 2.1 数据与 schema
-
-| 检查项 | 交付物 | 优先级 | 当前状态 |
+| 检查项 | 目标状态 | 当前状态 | 下一步 |
 |---|---|---|---|
-| 四类原始数据真实文件格式确认 | `schema_probe_report.md` | P0 | `部分完成` |
-| 逐笔成交字段映射确认 | `schema_probe_report.md` | P0 | `已完成` |
-| 逐笔委托字段映射确认 | `schema_probe_report.md` | P0 | `已完成` |
-| 逐笔撤单字段映射确认 | `schema_probe_report.md` | P0 | `未完成` |
-| 十档盘口字段映射确认 | `schema_probe_report.md` | P0 | `部分完成` |
-| `order_lifetime_ms` 可得性确认 | `schema_probe_report.md` | P0 | `未完成` |
-| 85 维参考特征是否提供确认 | `schema_probe_report.md` | P0 | `未完成` |
-| 市场上涨/下跌家数口径确认 | `market_pid_validation_report.md` | P0 | `未完成` |
+| 比赛概要设计版本 | V1.3 | `已更新` | 三类行为代理口径已对齐 |
+| 比赛详细设计版本 | V1.4 | `已更新` | 已补规则事件与规则窗口结构 |
+| 算法设计版本 | V1.3 | `已更新` | 作为 PID 重构主依据 |
+| 资金类型判断规范 | V1.1 | `已确认` | 作为规则层主依据 |
+| PID 原理与实现 | V1.1 | `已确认` | 作为结构反解主依据 |
+| Task 1 输出文件名 | `pattern_reco.csv` | `已实现` | 重构期间不得改变 |
+| Task 2 输出文件名 | `predict_result.csv` | `已实现` | 重构期间不得改变 |
+| 市场状态输出文件 | `market_pid_snapshot.csv` / `market_regime_report.md` | `已实现` | 保持兼容 |
+| 启动入口 | `main.py` | `已实现` | 保持 CLI 兼容 |
+| 输出目录规则 | `output/交易日_时间戳/` | `已实现` | 保持 |
+| 股票清单模式 | 支持 100 股清单过滤与排序 | `已实现` | 加回放验收 |
+| 缺失股票补位 | 名单股票缺失原始数据时补默认行并告警 | `已实现` | 加专项测试 |
 
-说明：
-- 当前真实数据链路已确认可读取 `逐笔成交.csv`、`逐笔委托.csv`、`行情.csv`
-- 当前未发现稳定可用的 `逐笔撤单.csv`
-- `schema_probe.py` 已实现，但尚未形成正式冻结版报告产物
+---
 
-### 2.2 标签与提交口径
+## 2. 当前代码实现核对
 
-| 检查项 | 交付物 | 优先级 | 当前状态 |
+### 2.1 已存在模块
+
+| 模块 | 当前文件 | 当前状态 | 重构处理 |
 |---|---|---|---|
-| `capital_type` 标签字典 | `configs/label_dict.yaml` | P0 | `已完成` |
-| `capital_intention` 提交标签字典 | `configs/label_dict.yaml` | P0 | `已完成` |
-| `pattern_type` 初始模式字典 | `pattern_model.py` / `label_dict.yaml` | P1 | `已完成` |
-| `pattern_reco.csv` 字段顺序校验 | 导出校验器 | P0 | `已完成` |
-| `predict_result.csv` 字段顺序校验 | 导出校验器 | P0 | `已完成` |
-| 市场状态文件字段与口径校验 | `exporter.py` / 文档 | P1 | `已完成` |
-| 100 股名单输出顺序一致性 | `scheduler.py` / 单测 | P0 | `已完成` |
+| 启动入口 | `main.py` | `已完成` | 保持入口，减少内部路径逻辑 |
+| 配置加载 | `src/config.py` | `已完成` | 保持 |
+| schema 探针 | `src/schema_probe.py` | `已完成` | 补正式报告输出流程 |
+| 调度流程 | `src/scheduler.py` | `已完成但过重` | P0 拆分 |
+| PID 分解入口 | `src/pid_decomposer.py` | `已完成` | 保持统一 facade 与模式选择 |
+| PID 公共骨架 | `src/pid_decomposer_shared.py` | `已完成` | 维护共享逻辑与诊断 |
+| PID-4D 实现 | `src/pid_decomposer_4d.py` | `已完成` | 独立维护 `baseline_4d` |
+| PID-5D 实现 | `src/pid_decomposer_5d.py` | `已完成` | 独立维护 `diag_5d / full_5d` |
+| Task 1 基线 | `src/pattern_model.py` | `规则基线已完成` | P2 升级原型库 |
+| Task 2 基线 | `src/capital_model.py` | `规则/PID 基线已完成` | P2 升级弱监督/监督模型 |
+| 市场 PID | `src/market_pid.py` | `基线已完成` | P1 校验市场口径 |
+| 导出 | `src/exporter.py` | `已完成` | 保持字段兼容 |
+| 数据结构 | `src/schemas.py` | `已初步扩展` | 已增加 StateFeature/规则事件结构，后续随 PID 字段统一继续补充 |
 
-### 2.3 基线优先策略
+### 2.2 设计要求但尚未独立成模块
 
-| 检查项 | 交付物 | 优先级 | 当前状态 |
+| 目标模块 | 当前承载位置 | 当前状态 | 重构优先级 |
 |---|---|---|---|
-| 第一阶段可运行基线 | 可运行 `main.py` + 首版输出 | P0 | `已完成` |
-| Task 2 规则引擎兜底 | `capital_model.py` 基线逻辑 | P0 | `已完成` |
-| Task 1 基线规则分类 | `pattern_model.py` 基线逻辑 | P1 | `已完成` |
-| Task 1 低置信回退器 | `fallback_pattern_rule()` | P1 | `已完成` |
-| 市场 PID 基线聚合方案 | `market_pid.py` 基线逻辑 | P0 | `已完成` |
-| 个股相对市场偏离指标 | `p_rel_market / i_rel_market / d_rel_market` | P1 | `已完成` |
-| 100 股样本定向处理 | 股票清单过滤与补位 | P0 | `已完成` |
+| `data_loader.py` | `scheduler.py` | `未拆分` | P0 |
+| `windowing.py` | `scheduler.py` | `未拆分` | P0 |
+| `reference_feature_builder.py` | `scheduler.py` / 参考文件直读逻辑 | `未拆分` | P1 |
+| `capital_rule_engine.py` | `scheduler.py` + PID selector/shared/4D/5D 链路的输入抽取 | `已初步拆分` | P0 |
+| `state_feature_builder.py` | PID selector/shared/4D/5D 结果 + `capital_model.py` 间隐式传递 | `已初步拆分` | P1 |
+| `prod.yaml` | 无 | `未完成` | P2 |
 
 ---
 
-## 3. 当前代码实现检查
+## 3. P0 重构准备清单
 
-### 3.1 项目骨架
+### 3.1 调度层瘦身
 
-| 检查项 | 设计目标 | 当前状态 |
+| 任务 | 目标文件 | 验收标准 | 状态 |
+|---|---|---|---|
+| 抽出 CSV 读取与编码适配 | `src/data_loader.py` | 支持 `utf-8-sig / gb18030`，保留中文文件名适配 | `已完成` |
+| 抽出股票目录扫描与缺失文件检查 | `src/data_loader.py` | `scheduler.py` 仅保留兼容包装，主逻辑迁移到 `data_loader.py` | `已完成` |
+| 抽出 48 个 5 分钟窗口映射 | `src/windowing.py` | `_time_to_window_id` 委托到 `windowing.py` 并由单测覆盖 | `已完成` |
+| 抽出逐笔成交到窗口桶聚合 | `src/windowing.py` / `src/capital_rule_engine.py` / `src/order_lifecycle.py` | 窗口桶初始化、规则事件聚合与订单生命周期恢复已迁移；支持沪市 A/D 委托流、深市成交表撤单、委托号直连与价格 FIFO 队列 | `已完成` |
+| 保持 `run_daily_batch()` 外部签名 | `src/scheduler.py` | 原测试和 CLI 不破坏，单元测试 33 项通过 | `已完成` |
+
+### 3.2 规则层口径对齐
+
+| 任务 | 目标文件 | 验收标准 | 状态 |
+|---|---|---|---|
+| 建立事件级 `CapitalBehaviorEvent` | `src/schemas.py` | 包含 `capital_type_rule / confidence_level / fallback_reason / reason_codes` | `已完成` |
+| 新增规则层聚合字段 | `src/capital_rule_engine.py` | 输出 `CH_rule_t / Q_rule_t / R_seed_t`，并保持历史字段兼容 | `已完成` |
+| 替换历史 `signed_mix_qr_amount` 主口径 | `src/scheduler.py` / PID selector/shared/4D/5D 链路 | PID 输入优先读取 `CH_rule_t / Q_rule_t / R_seed_t`，旧字段仅作 fallback | `进行中` |
+| 输出字段契约冻结 | `reports/validation/state_feature_contract.md` | 明确规则流、一级贡献、结构反解、近似字段四类边界 | `已完成` |
+| 被动成交 5 分钟阈值字段预留 | `src/capital_rule_engine.py` | 可处理 `order_age_minutes` 缺失并标记低置信，专项单测覆盖 | `已完成` |
+| 集合竞价成交分类预留 | `src/capital_rule_engine.py` | 当前先按低置信 `quant` 回退，待接入竞价成交价后细化 | `进行中` |
+
+### 3.3 PID 输出口径对齐
+
+| 任务 | 目标文件 | 验收标准 | 状态 |
+|---|---|---|---|
+| 模式名统一 | `src/pid_decomposer.py` | 只输出 `rule_base / baseline_4d / diag_5d / full_5d` | `已完成` |
+| 字段名统一 | `src/pid_decomposer.py` / `src/schemas.py` | 使用 `phi / theta / beta_ch / beta_q / beta_mix / beta_retail`，保留历史别名兼容 | `已完成` |
+| 结构反解闭合断言 | PID selector/shared/4D/5D 链路 | 校验 `capital_q + capital_ch = c_p` 等三组关系，并输出诊断误差 | `已完成` |
+| 规则近似字段隔离 | PID selector/shared/4D/5D 链路 / `src/capital_model.py` | `rule_base` 不写 `capital_*` 结构字段，规则近似仅落在 `capital_*_rule_approx` | `已完成` |
+| 清理展示分摊主口径 | PID selector/shared/4D/5D 链路 | `delta_*_display` 不参与 `capital_type` 主判断，debug 显式输出主判断来源 | `已完成` |
+| 4D / 5D 文件级拆分 | `src/pid_decomposer.py` / `src/pid_decomposer_shared.py` / `src/pid_decomposer_4d.py` / `src/pid_decomposer_5d.py` | 4D 与 5D 逻辑独立、上层统一通过 selector 调用 | `已完成` |
+| 市场 PID 主聚合口径 | `src/market_pid.py` | 优先使用 `c_p / c_i / c_d`，fallback 必须记录来源，不得把规则流直接当模型外力贡献 | `已完成` |
+
+---
+
+## 4. P1 工程闭环清单
+
+### 4.1 schema 与报告
+
+| 检查项 | 交付物 | 当前状态 | 下一步 |
+|---|---|---|---|
+| 四类原始数据真实文件格式确认 | `schema_probe_report.md` | `部分完成` | 补冻结版报告 |
+| 逐笔成交字段映射确认 | `schema_probe_report.md` | `已完成` | 写入报告 |
+| 逐笔委托字段映射确认 | `schema_probe_report.md` | `已完成` | 写入报告 |
+| 逐笔撤单字段映射确认 | `schema_probe_report.md` | `已完成` | 沪市按委托表 `委托类型=D` 扣减，深市按成交表 `成交代码=C` 扣减；字段缺失时进入低置信量化回退 |
+| 十档盘口字段映射确认 | `schema_probe_report.md` | `部分完成` | 补覆盖率 |
+| `order_lifetime_ms` 可得性确认 | `schema_probe_report.md` | `已完成` | 已接入 `order_lifecycle.py`，统一恢复 `order_age_minutes`；支持沪深差异规则、原始整数价/元价归一、成交表撤单扣减；缺失时低置信量化回退 |
+| 85 维参考特征是否提供确认 | `schema_probe_report.md` | `未完成` | 决定直读或重算 |
+| 市场上涨/下跌家数口径确认 | `market_pid_validation_report.md` | `已完成` | 20260707 默认 100 股回放已生成市场口径报告 |
+
+### 4.2 状态特征与市场口径
+
+| 任务 | 目标文件 | 验收标准 | 状态 |
+|---|---|---|---|
+| 建立 `StateFeature` 生成器 | `src/state_feature_builder.py` | 从 PID 结果生成 V1.4 字段集，单测覆盖 `rule_base` 与结构模式 | `已完成` |
+| 保留 `debug_info` 必要字段 | `src/capital_model.py` | 至少包含 `mode_name / is_structural_output / capital_* / rule_error_*` | `已完成` |
+| 市场 PID 口径报告 | `reports/validation/market_pid_validation_report.md` | 明确上涨/下跌家数、相对市场偏离计算 | `已完成` |
+| 100 股回放报告 | `reports/validation/100_stock_replay_report.md` | 记录行数、缺失补位、耗时、警告 | `已完成` |
+| 状态特征字段契约 | `reports/validation/state_feature_contract.md` | 对齐 `CapitalBehaviorEvent / CapitalRuleWindowFeature / StateFeature` | `已完成` |
+
+---
+
+## 5. P2 模型升级清单
+
+以下任务应在 P0/P1 重构稳定后执行，避免在模块边界不稳时叠加模型复杂度。
+
+| 任务 | 目标文件 | 验收标准 | 状态 |
+|---|---|---|---|
+| 将 `capital_model.py` 从规则基线升级为弱监督/监督模型 | `src/capital_model.py` | 保留规则兜底；模型输出包含置信度和解释字段 | `待执行` |
+| 将 `pattern_model.py` 从规则基线升级为聚类原型库 | `src/pattern_model.py` | 支持离线原型训练 + 在线最近原型归类 + 低置信回退 | `待执行` |
+| 增加原型库版本管理 | `models/pattern_prototypes/` | 输出 `prototype_id` 与版本号 | `待执行` |
+| 增加弱监督种子生成报告 | `reports/validation/weak_supervision_seed_report.md` | 明确种子规则、覆盖率、噪声风险 | `待执行` |
+
+---
+
+## 6. 测试与验收检查
+
+| 检查项 | 验收标准 | 当前状态 | 重构后要求 |
+|---|---|---|---|
+| `main.py --help` 可执行 | 正常输出参数说明 | `已完成` | 必须保持 |
+| schema 探针运行 | 正常输出 `schema_probe_report.md` | `已完成` | 报告内容补全 |
+| 空目录输入 | 结构化告警与缺失文件列表 | `已完成` | 必须保持 |
+| 样例结果导出 | 两个 CSV 字段正确 | `已完成` | 必须保持 |
+| 市场状态文件导出 | 快照文件与报告文件可生成 | `已完成` | 必须保持 |
+| `submit.zip` 打包 | 包含两个标准 CSV | `已完成` | 必须保持 |
+| 股票清单过滤 | 仅输出清单股票 | `已完成` | 必须保持 |
+| 缺失股票补齐 | 输出行数与股票清单一致 | `已完成` | 必须保持 |
+| 单元测试 | 当前测试全部通过 | `已完成` | 每步重构后运行 |
+| 集成测试 | 真实样本全链路回放 | `已完成` | 20260707 默认 100 股样本已完成回放，后续可扩展多日回放 |
+| 性能测试 | 全市场切片耗时基准 | `部分完成` | `--profile` 可输出性能摘要，真实全市场基准待补 |
+| 稳定性报告 | 聚类/分类多日稳定性 | `未完成` | P2 后补 |
+
+建议新增测试：
+
+1. `test_windowing.py`：已新增，覆盖 09:30-11:30、13:00-15:00、15:00 边界与窗口桶 schema。
+2. `test_data_loader.py`：已新增，覆盖股票代码识别、中文规范文件名、缺失文件、股票池过滤与日期过滤。
+3. `test_capital_rule_engine.py`：已新增，覆盖主动大单、被动 5 分钟阈值、缺失委托存活时间低置信回退。
+4. `test_state_feature_builder.py`：已新增，覆盖 `rule_base` 结构字段置空、近似字段单列与 `capital_model` debug 契约。
+
+---
+
+## 7. 重构执行顺序
+
+### 阶段 A：无行为变化拆分
+
+1. 新建 `data_loader.py`，迁移 CSV 读取、股票目录扫描、缺失文件检查。
+2. 新建 `windowing.py`，迁移时间窗口映射与窗口桶初始化。
+3. 调整 `scheduler.py` 只负责编排，不改变输出结果。
+4. 运行现有单元测试与一次样本回放，确认输出 CSV 字段和行数不变。
+
+### 阶段 B：规则层显式化
+
+1. 新建 `capital_rule_engine.py`。
+2. 把现有 `signed_large_active_amount / signed_mix_qr_amount` 兼容输入转换为正式 `CH_rule / Q_rule / R_seed`。
+3. 保留历史字段读取兼容，但内部主字段统一为新命名。
+4. 增加规则层单测。
+5. 输出 `state_feature_contract.md` 草案，作为后续模型升级字段依据。
+
+### 阶段 C：PID 与 StateFeature 对齐
+
+1. 调整 PID selector/shared/4D/5D 链路的模式名、字段名与选择入口说明。
+2. 增加三组关联方程闭合校验。
+3. 新建 `state_feature_builder.py`。
+4. 调整 `capital_model.py` 从 `StateFeature` 或 PID 结果读取结构字段。
+5. 验证 `rule_base` 模式下结构字段为空、规则近似字段单列。
+
+### 阶段 D：报告与回放
+
+1. 产出冻结版 `schema_probe_report.md`。
+2. 产出 `market_pid_validation_report.md`。
+3. 产出 100 股样本回放报告。
+4. 更新 README 中的重构后运行说明。
+
+### 阶段 E：模型升级
+
+1. 升级 `capital_model.py` 弱监督/监督模型。
+2. 升级 `pattern_model.py` 聚类原型库。
+3. 增加模型版本、原型库版本和稳定性报告。
+
+---
+
+## 8. 当前结论
+
+### 8.1 已实现内容
+
+1. 比赛系统已具备可运行的日终批处理能力。
+2. 已可输出 `pattern_reco.csv`、`predict_result.csv`、市场状态文件和 `submit.zip`。
+3. 已支持真实中文 Level2 文件读取。
+4. 已支持 100 股股票清单过滤、顺序保持和缺失补位。
+5. 已有 PID 结构反解雏形，可作为重构基础。
+
+### 8.2 主要技术债
+
+1. `scheduler.py` 职责过重，是本轮重构第一优先级。
+2. 规则层三类流尚未作为独立模块显式存在。
+3. PID 输出仍保留历史兼容字段，需要与 V1.3 算法设计完全对齐。
+4. `StateFeature` 已落成独立生成器，后续重点转为 PID 字段名与结构闭合校验。
+5. schema 冻结报告、市场口径报告、100 股回放报告尚未成套交付。
+
+### 8.3 不建议立即做的事
+
+1. 不建议在模块拆分前直接引入复杂监督模型。
+2. 不建议在 `scheduler.py` 继续堆叠新特征。
+3. 不建议把 `Q_rule / R_seed` 直接写入 `capital_q / capital_retail`。
+4. 不建议在缺失 `order_age_minutes` 时输出高置信散户结论。
+
+---
+
+## 10. 修订记录
+
+| 版本 | 日期 | 说明 |
 |---|---|---|
-| `比赛系统/main.py` | 可运行入口存在 | `已完成` |
-| `比赛系统/src/config.py` | 配置加载存在 | `已完成` |
-| `比赛系统/src/schemas.py` | 基础数据结构存在 | `已完成` |
-| `比赛系统/src/schema_probe.py` | schema 探针存在 | `已完成` |
-| `比赛系统/src/market_pid.py` | 市场 PID 模块存在 | `已完成` |
-| `比赛系统/src/exporter.py` | CSV 导出存在 | `已完成` |
-| `比赛系统/src/scheduler.py` | 调度骨架存在 | `已完成` |
-| `比赛系统/configs/dev.yaml` | 基础运行配置存在 | `已完成` |
-| `比赛系统/configs/label_dict.yaml` | 标签配置存在 | `已完成` |
-| `比赛系统/init_env.sh` | 环境脚本存在 | `已完成` |
-| `比赛系统/README.md` | 启动说明存在 | `已完成` |
-| `比赛系统/configs/prod.yaml` | 生产配置存在 | `未完成` |
-| `比赛系统/src/data_loader.py` | 独立数据接入模块 | `未完成` |
-| `比赛系统/src/windowing.py` | 独立窗口模块 | `未完成` |
-| `比赛系统/src/reference_feature_builder.py` | 独立参考特征模块 | `未完成` |
-| `比赛系统/src/state_feature_builder.py` | 独立状态特征模块 | `未完成` |
-
-### 3.2 功能能力
-
-| 检查项 | 目标状态 | 当前状态 |
-|---|---|---|
-| `probe_input_schema()` | 可扫描输入目录并输出结构化结果 | `已完成` |
-| 原始数据中文文件名适配 | 支持 `逐笔成交/逐笔委托/行情` | `已完成` |
-| `gb18030` 编码适配 | 可读取真实样本 | `已完成` |
-| `export_pattern_reco()` | 可写出标准文件 | `已完成` |
-| `export_predict_result()` | 可写出标准文件 | `已完成` |
-| `export_market_pid_snapshot()` | 可写出市场快照文件 | `已完成` |
-| `export_market_regime_report()` | 可写出市场状态报告 | `已完成` |
-| `build_submit_zip()` | 可打包提交文件 | `已完成` |
-| `validate_submission_files()` | 可校验字段顺序和必填项 | `已完成` |
-| 股票清单过滤 | 仅处理指定股票集合 | `已完成` |
-| 缺失股票补位 | 输出 100 股完整结果 | `已完成` |
-| 按时间目录输出 | 每次运行落到独立目录 | `已完成` |
-| 聚类原型库 | 离线原型训练 + 在线最近原型归类 | `未完成` |
-| 弱监督/监督模型 | Task 2 模型化输出 | `未完成` |
-| 状态空间解释引擎接入 | KF + RTS 实际进入比赛系统链路 | `未完成` |
+| V1.6 | 2026-07-11 | 补充统一 PID/规则口径、默认 `baseline_4d` 运行态与市场 PID 主聚合约束 |
 
 ---
 
-## 4. 测试与验收检查
+## 9. 下一步执行建议
 
-| 检查项 | 验收标准 | 当前状态 |
-|---|---|---|
-| `main.py --help` 可执行 | 正常输出参数说明 | `已完成` |
-| schema 探针运行 | 正常输出 `schema_probe_report.md` | `已完成` |
-| 空目录输入 | 给出结构化告警与缺失文件列表 | `已完成` |
-| 样例结果导出 | 两个 CSV 文件字段正确 | `已完成` |
-| 市场状态文件导出 | 快照文件与报告文件可生成 | `已完成` |
-| `submit.zip` 打包 | 包含两个标准 CSV | `已完成` |
-| 相对路径运行 | 不依赖绝对路径 | `已完成` |
-| 股票清单过滤 | 仅输出清单股票 | `已完成` |
-| 缺失股票补齐 | 输出行数与股票清单一致 | `已完成` |
-| 单元测试 | 当前测试全部通过 | `已完成` |
-| 集成测试 | 真实样本全链路回放 | `部分完成` |
-| 性能测试 | 全市场切片耗时基准 | `部分完成` |
-| 稳定性报告 | 聚类/分类多日稳定性 | `未完成` |
-
----
-
-## 5. 当前结论
-
-### 5.1 已实现内容
-
-1. 比赛系统已具备可运行的日终批处理能力
-2. 已可输出 `pattern_reco.csv`、`predict_result.csv`、市场状态文件和 `submit.zip`
-3. 已支持真实中文 Level2 文件读取
-4. 已支持 100 股股票清单过滤、顺序保持和缺失补位
-5. 已支持统一输出到 `E:\2026OPC大赛\自动化交易\output\交易日_时间戳\`
-
-### 5.2 部分实现内容
-
-1. schema 探针已实现，但正式冻结报告尚未整理
-2. 市场 PID 已实现基线版，但市场口径尚未和赛题说明完全闭环
-3. 全市场处理已可切片运行，但尚未形成正式性能报告
-
-### 5.3 未实现内容
-
-1. 逐笔撤单正式接入
-2. `order_lifetime_ms` 可得性闭环
-3. 85 维参考特征体系完整落地
-4. 状态空间解释引擎正式接入比赛链路
-5. Task 1 离线聚类原型库
-6. Task 2 弱监督/监督模型
-7. 集成测试、性能测试、稳定性报告成套交付
-
----
-
-## 6. 后续建议执行顺序
-
-1. 产出正式版 `schema_probe_report.md`，冻结字段映射与缺失结论
-2. 更新 `比赛详细设计说明书.md`，同步当前基线实现与未实现模块
-3. 明确市场上涨/下跌家数口径，补 `market_pid_validation_report.md`
-4. 将 `capital_model.py` 从规则基线升级为弱监督/监督模型
-5. 将 `pattern_model.py` 从规则基线升级为聚类原型库
-6. 增加集成测试、性能测试与 100 股样本回放报告
+1. 先做阶段 A：拆 `data_loader.py` 与 `windowing.py`，保持行为不变。
+2. 再做阶段 B：显式 `capital_rule_engine.py`，统一 `CH_rule / Q_rule / R_seed`。
+3. 然后做阶段 C：对齐 PID selector/shared/4D/5D 链路与 `StateFeature`。
+4. 最后推进原选中任务：
+   - 将 `capital_model.py` 从规则基线升级为弱监督/监督模型。
+   - 将 `pattern_model.py` 从规则基线升级为聚类原型库。
+   - 增加集成测试、性能测试与 100 股样本回放报告。

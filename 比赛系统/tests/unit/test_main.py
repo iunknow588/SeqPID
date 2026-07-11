@@ -8,6 +8,9 @@ import main
 
 
 class MainPathResolutionTest(unittest.TestCase):
+    def test_default_external_output_dir_is_level2_output(self) -> None:
+        self.assertEqual(main.DEFAULT_OUTPUT_DIR, Path(r"C:\level-2-ana\output"))
+
     def test_infer_trade_date_from_path(self) -> None:
         self.assertEqual(main._infer_trade_date_from_path(r"C:\level-2-ana\data\20260706"), "20260706")
 

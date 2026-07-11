@@ -20,5 +20,6 @@ species_rules:
   large_order_amount_threshold: 500000
   active_fallback_to_side: true
 pid_decomposer:
+  mode: baseline_4d
   kappa_i: 0.5
   capital_anchor_error_max: 0.4

@@ -11,11 +11,18 @@ SRC_DIR = ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from pid_decomposer import PIDDecomposer
+from pid_decomposer import PIDDecomposer, create_pid_decomposer
+from pid_decomposer_4d import PIDDecomposer4D
+from pid_decomposer_5d import PIDDecomposer5D
 from schemas import DailySample
 
 
 class PIDDecomposerTest(unittest.TestCase):
+    def test_create_pid_decomposer_selects_concrete_module(self) -> None:
+        self.assertIsInstance(create_pid_decomposer({"pid_decomposer": {"mode": "baseline_4d"}}), PIDDecomposer4D)
+        self.assertIsInstance(create_pid_decomposer({"pid_decomposer": {"mode": "diag_5d"}}), PIDDecomposer5D)
+        self.assertIsInstance(create_pid_decomposer({"pid_decomposer": {"mode": "full_5d"}}), PIDDecomposer5D)
+
     def test_sparse_normalize_keeps_zero_windows_zero(self) -> None:
         decomposer = PIDDecomposer({})
 
@@ -59,10 +66,15 @@ class PIDDecomposerTest(unittest.TestCase):
         self.assertEqual(len(result.c_p), 48)
         self.assertLessEqual(result.pid_closure_error, 1e-10)
         self.assertLessEqual(result.alloc_closure_error, 1e-10)
+        self.assertIn(result.mode, {"rule_base", "baseline_4d", "diag_5d", "full_5d"})
+        self.assertTrue(np.array_equal(result.phi, result.inertia))
+        self.assertTrue(np.array_equal(result.theta, result.damping))
+        self.assertEqual(result.dominant_source, "capital_external_force")
+        self.assertFalse(result.display_fields_used_for_dominant)
         self.assertIn(result.dominant_type, {"游资", "量化", "散户"})
         self.assertIn(result.dominant_intention, {"买入", "卖出", "中性"})
 
-    def test_capital_sign_maps_to_intention(self) -> None:
+    def test_rule_anchor_does_not_override_external_force_capital(self) -> None:
         decomposer = PIDDecomposer({"pid_decomposer": {"capital_anchor_error_max": 999.0}})
         delta_p = np.zeros(48)
         u_ch = np.zeros(48)
@@ -83,8 +95,38 @@ class PIDDecomposerTest(unittest.TestCase):
         )
 
         self.assertEqual(result.dominant_type, "游资")
-        self.assertEqual(result.dominant_intention, "买入")
-        self.assertGreater(result.capital_ch[-1], 0.0)
+        self.assertEqual(result.dominant_intention, "中性")
+        self.assertEqual(result.capital_ch[-1], 0.0)
+
+    def test_external_force_identity_closes_to_p_term(self) -> None:
+        decomposer = PIDDecomposer({})
+        delta_p = np.zeros(48)
+        delta_p[10] = 0.01
+        u_ch = np.zeros(48)
+        u_mix = np.zeros(48)
+        u_ch[9] = 2.0
+        u_mix[9] = -1.0
+
+        result = decomposer._decompose_arrays(
+            stock_code="000001.SZ",
+            transaction_date="20260710",
+            delta_p=delta_p,
+            u_ch=u_ch,
+            u_mix=u_mix,
+            ch_anchor=np.full(48, np.nan),
+            mix_qr=np.full(48, np.nan),
+        )
+
+        self.assertLessEqual(result.capital_cp_identity_error, 1e-10)
+        self.assertLessEqual(result.capital_ci_identity_error, 1e-10)
+        self.assertLessEqual(result.capital_cd_identity_error, 1e-10)
+        self.assertLessEqual(result.capital_identity_error, 1e-10)
+        self.assertTrue(
+            np.allclose(
+                result.capital_ch + result.capital_q + result.capital_retail,
+                result.c_p,
+            )
+        )
 
 
 if __name__ == "__main__":

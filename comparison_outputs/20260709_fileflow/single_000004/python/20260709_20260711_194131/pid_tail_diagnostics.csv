@@ -1,0 +1,2 @@
+﻿stock_code,transaction_date,mode,kf_converged,dominant_type,dominant_intention,hot_money_ratio,quant_ratio,retail_ratio,phi_tail,theta_tail,beta_ch_tail,beta_mix_tail,beta_q_tail,beta_retail_tail,c_p_tail,c_i_tail,c_d_tail,capital_ch_tail,capital_q_tail,capital_retail_tail,capital_anchor_error_tail,noise_ratio_tail,explain_ratio_tail,capital_identity_error,closure_error,warnings
+000004.SZ,20260709,baseline_4d,true,量化,卖出,0.020833,0.979167,0.0,-1.12081,0.371971,0.0,0.0,0.0,0.0,-0.0,0.0,0.0,0.0,-0.0,-0.0,0.0,0.787409,0.212591,1.32e-23,0.00e+00,

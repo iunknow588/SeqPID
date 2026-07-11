@@ -1,8 +1,12 @@
-use crate::capital_model::predict_capital;
+﻿use crate::capital_model::predict_capitals;
+use crate::batch_alerts::{build_batch_warnings, collect_missing_symbols, incomplete_stock_dirs_to_json};
+use crate::batch_reporting::{build_batch_result, build_batch_summary, build_performance_summary};
 use crate::config::{ConfigMap, get_bool};
 use crate::exporter;
 use crate::market_pid::{attach_market_relative_metrics, estimate_market_pid};
+use crate::order_lifecycle::{time_value_to_seconds, OrderLifecycleResolver};
 use crate::pattern_model::predict_pattern;
+use crate::pid_decomposer::PIDDecomposer;
 use crate::schemas::{DailySample, MarketPidSnapshot, PatternResult, PredictResult};
 use anyhow::Result;
 use csv::ReaderBuilder;
@@ -11,6 +15,25 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+#[derive(Clone)]
+struct QRow {
+    time: f64,
+    close: f64,
+    open: f64,
+    high: f64,
+    low: f64,
+    prev_close: f64,
+    up: f64,
+    down: f64,
+    flat: f64,
+    bid_px_1: f64,
+    bid_px_2: f64,
+    ask_px_1: f64,
+    ask_px_2: f64,
+    bid_vols: [f64; 10],
+    ask_vols: [f64; 10],
+}
 
 fn iter_stock_dirs(d: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = fs::read_dir(d).ok()
@@ -62,7 +85,203 @@ fn scaled_price(val: f64) -> f64 {
     if val > 1000.0 { val / 10000.0 } else { val }
 }
 
-fn build_raw(sd: &Path) -> Result<HashMap<String, f64>> {
+fn time_to_window_id(value: i64) -> Option<usize> {
+    if value <= 0 {
+        return None;
+    }
+    let hhmmss = if value > 235959 { value / 1000 } else { value };
+    let hh = hhmmss / 10000;
+    let mm = (hhmmss % 10000) / 100;
+    let total_minutes = hh * 60 + mm;
+    let morning_start = 9 * 60 + 30;
+    let morning_end = 11 * 60 + 30;
+    let afternoon_start = 13 * 60;
+    let afternoon_end = 15 * 60;
+    if (morning_start..morning_end).contains(&total_minutes) {
+        Some(((total_minutes - morning_start) / 5).min(23) as usize)
+    } else if (afternoon_start..afternoon_end).contains(&total_minutes) {
+        Some((24 + (total_minutes - afternoon_start) / 5).min(47) as usize)
+    } else if total_minutes >= afternoon_end {
+        Some(47)
+    } else {
+        None
+    }
+}
+
+fn trade_side_sign(r: &csv::StringRecord, idx: &HashMap<&str, usize>) -> i32 {
+    let raw = ["BS鏍囧織", "side", "涔板崠鏂瑰悜", "鎴愪氦鏂瑰悜", "濮旀墭浠ｇ爜"]
+        .iter()
+        .find_map(|name| idx.get(*name).and_then(|&i| r.get(i)))
+        .unwrap_or("")
+        .trim()
+        .to_uppercase();
+    if matches!(raw.as_str(), "B" | "BUY" | "1" | "买" | "主动买") {
+        1
+    } else if matches!(raw.as_str(), "S" | "SELL" | "2" | "卖" | "主动卖") {
+        -1
+    } else {
+        0
+    }
+}
+
+fn trade_side_sign_from_row(row: &HashMap<String, String>) -> i32 {
+    let raw = [
+        "BS\u{6807}\u{5fd7}",
+        "side",
+        "\u{4e70}\u{5356}\u{65b9}\u{5411}",
+        "\u{6210}\u{4ea4}\u{65b9}\u{5411}",
+        "\u{59d4}\u{6258}\u{4ee3}\u{7801}",
+    ]
+    .iter()
+    .find_map(|name| row.get(*name))
+    .map(|value| value.trim().to_uppercase())
+    .unwrap_or_default();
+    if matches!(raw.as_str(), "B" | "BUY" | "1" | "买" | "主动买") {
+        1
+    } else if matches!(raw.as_str(), "S" | "SELL" | "2" | "卖" | "主动卖") {
+        -1
+    } else {
+        0
+    }
+}
+
+fn is_aggressive_price_shaping(price: f64, quote: Option<&QRow>, active_sign: i32, amount: f64, fallback_hot_amount: f64) -> bool {
+    let Some(quote) = quote else {
+        return active_sign != 0 && amount >= fallback_hot_amount;
+    };
+    if active_sign > 0 {
+        if quote.ask_px_2 > 0.0 && price >= quote.ask_px_2 {
+            return true;
+        }
+        if quote.ask_px_2 <= 0.0 && quote.ask_px_1 > 0.0 && price > quote.ask_px_1 {
+            return true;
+        }
+    } else if active_sign < 0 {
+        if quote.bid_px_2 > 0.0 && price <= quote.bid_px_2 {
+            return true;
+        }
+        if quote.bid_px_2 <= 0.0 && quote.bid_px_1 > 0.0 && price < quote.bid_px_1 {
+            return true;
+        }
+    }
+    false
+}
+
+fn qualifies_hot_money(
+    bucket: &HashMap<String, String>,
+    active_sign: i32,
+    amount: f64,
+    species_large_threshold: f64,
+    active_fallback_hot_amount: f64,
+    is_price_shaping_active: bool,
+    quote_known: bool,
+) -> bool {
+    if active_sign == 0 {
+        return false;
+    }
+    if !quote_known {
+        return amount >= active_fallback_hot_amount;
+    }
+    if amount >= species_large_threshold {
+        return true;
+    }
+    if !is_price_shaping_active {
+        return false;
+    }
+
+    let same_dir_count = if active_sign > 0 {
+        get_bucket_f64(bucket, "active_buy_count")
+    } else {
+        get_bucket_f64(bucket, "active_sell_count")
+    };
+    let same_dir_amount = if active_sign > 0 {
+        get_bucket_f64(bucket, "active_buy_amount")
+    } else {
+        get_bucket_f64(bucket, "active_sell_amount")
+    };
+    let moderate_support = amount >= active_fallback_hot_amount
+        && (same_dir_count >= 1.0 || same_dir_amount >= active_fallback_hot_amount);
+    let strong_support =
+        same_dir_count >= 2.0 && same_dir_amount >= active_fallback_hot_amount * 1.5;
+    moderate_support || strong_support
+}
+
+fn lookup_quote_at_or_before(timestamp: i32, qrows: &[QRow]) -> Option<&QRow> {
+    let mut candidate = None;
+    for row in qrows {
+        if row.time as i32 <= timestamp {
+            candidate = Some(row);
+        } else {
+            break;
+        }
+    }
+    candidate.or_else(|| qrows.first())
+}
+
+fn active_side_sign(price: f64, quote: Option<&QRow>, side_sign: i32) -> i32 {
+    if let Some(quote) = quote {
+        let bid_px_1 = quote.bid_px_1;
+        let ask_px_1 = quote.ask_px_1;
+        let has_quote = bid_px_1 > 0.0 || ask_px_1 > 0.0;
+        if price > 0.0 && ask_px_1 > 0.0 && price >= ask_px_1 {
+            return 1;
+        }
+        if price > 0.0 && bid_px_1 > 0.0 && price <= bid_px_1 {
+            return -1;
+        }
+        if has_quote {
+            return 0;
+        }
+    }
+    side_sign
+}
+
+fn get_bucket_f64(bucket: &HashMap<String, String>, key: &str) -> f64 {
+    bucket.get(key).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0)
+}
+
+fn add_bucket_f64(bucket: &mut HashMap<String, String>, key: &str, value: f64) {
+    let current = get_bucket_f64(bucket, key);
+    bucket.insert(key.to_string(), (current + value).to_string());
+}
+
+fn get_nested_f64(config: &ConfigMap, section: &str, key: &str, default: f64) -> f64 {
+    config
+        .get(section)
+        .and_then(|value| value.as_mapping())
+        .and_then(|mapping| mapping.get(serde_yaml::Value::String(key.to_string())))
+        .and_then(|value| value.as_f64())
+        .unwrap_or(default)
+}
+
+fn get_nested_bool(config: &ConfigMap, section: &str, key: &str, default: bool) -> bool {
+    config
+        .get(section)
+        .and_then(|value| value.as_mapping())
+        .and_then(|mapping| mapping.get(serde_yaml::Value::String(key.to_string())))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(default)
+}
+
+fn record_to_map(headers: &[String], record: &csv::StringRecord) -> HashMap<String, String> {
+    headers
+        .iter()
+        .enumerate()
+        .map(|(index, header)| {
+            (
+                header.clone(),
+                record.get(index).unwrap_or("").trim().to_string(),
+            )
+        })
+        .collect()
+}
+
+struct RawBuildOutput {
+    summary: HashMap<String, f64>,
+    rows: Vec<HashMap<String, String>>,
+}
+
+fn build_raw(sd: &Path, config: &ConfigMap) -> Result<RawBuildOutput> {
     let mut s = HashMap::new();
 
     // 1. Read quote rows
@@ -75,10 +294,6 @@ fn build_raw(sd: &Path) -> Result<HashMap<String, f64>> {
     let qv = |r: &csv::StringRecord, n: &str| -> f64 {
         qi.get(n).and_then(|&i| r.get(i)).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0)
     };
-
-    struct QRow { time: f64, close: f64, open: f64, high: f64, low: f64, prev_close: f64,
-        up: f64, down: f64, flat: f64,
-        bid_vols: [f64; 10], ask_vols: [f64; 10] }
 
     let mut qrows: Vec<QRow> = Vec::new();
     for res in qr.records() {
@@ -98,6 +313,10 @@ fn build_raw(sd: &Path) -> Result<HashMap<String, f64>> {
             up: qv(&r, "\u{4e0a}\u{6da8}\u{54c1}\u{79cd}\u{6570}"),
             down: qv(&r, "\u{4e0b}\u{8dcc}\u{54c1}\u{79cd}\u{6570}"),
             flat: qv(&r, "\u{6301}\u{5e73}\u{54c1}\u{79cd}\u{6570}"),
+            bid_px_1: scaled_price(qv(&r, "\u{7533}\u{4e70}\u{4ef7}1")),
+            bid_px_2: scaled_price(qv(&r, "\u{7533}\u{4e70}\u{4ef7}2")),
+            ask_px_1: scaled_price(qv(&r, "\u{7533}\u{5356}\u{4ef7}1")),
+            ask_px_2: scaled_price(qv(&r, "\u{7533}\u{5356}\u{4ef7}2")),
             bid_vols: bv, ask_vols: av,
         });
     }
@@ -152,28 +371,147 @@ fn build_raw(sd: &Path) -> Result<HashMap<String, f64>> {
         close_strength = (close_price - low_price) / (high_price - low_price);
     }
 
-    // 2. Read trades
+    // 2. Read orders for both lifecycle recovery and summary stats
+    let mut order_rows: Vec<HashMap<String, String>> = Vec::new();
+    let mut cancel_ratio = 0.0;
+    let mut order_buy_ratio = 0.5;
+    let mut order_count = 0usize;
+    let op = sd.join("\u{9010}\u{7b14}\u{59d4}\u{6258}.csv");
+    if op.exists() {
+        if let Ok(ob) = fs::read(&op) {
+            let ot = dec(&ob);
+            let ot = ot.strip_prefix('\u{FEFF}').unwrap_or(&ot);
+            let mut or_ = ReaderBuilder::new().has_headers(true).from_reader(ot.as_bytes());
+            if let Ok(hd) = or_.headers() {
+                let oh: Vec<String> = hd.iter().map(|x| x.to_string()).collect();
+                let oi: HashMap<&str, usize> = oh.iter().enumerate().map(|(i, h)| (h.as_str(), i)).collect();
+                let osv = |r: &csv::StringRecord, n: &str| -> String {
+                    oi.get(n).and_then(|&i| r.get(i)).unwrap_or("").trim().to_string()
+                };
+                let mut cancel_like = 0usize;
+                let mut buy_orders = 0usize;
+                let mut sell_orders = 0usize;
+                for res in or_.records() {
+                    let r = match res { Ok(r) => r, Err(_) => continue };
+                    order_count += 1;
+                    order_rows.push(record_to_map(&oh, &r));
+                    let otype = osv(&r, "\u{59d4}\u{6258}\u{7c7b}\u{578b}");
+                    let code = osv(&r, "\u{59d4}\u{6258}\u{4ee3}\u{7801}");
+                    if !otype.is_empty() && otype != "0" {
+                        cancel_like += 1;
+                    }
+                    if code == "B" {
+                        buy_orders += 1;
+                    }
+                    if code == "S" {
+                        sell_orders += 1;
+                    }
+                }
+                cancel_ratio = if order_count > 0 { cancel_like as f64 / order_count as f64 } else { 0.0 };
+                order_buy_ratio = if buy_orders + sell_orders > 0 {
+                    buy_orders as f64 / (buy_orders + sell_orders) as f64
+                } else {
+                    0.5
+                };
+            }
+        }
+    }
+
+    // 3. Read trades
     let tp = sd.join("\u{9010}\u{7b14}\u{6210}\u{4ea4}.csv");
     let tb = fs::read(&tp)?;
     let tt = dec(&tb); let tt = tt.strip_prefix('\u{FEFF}').unwrap_or(&tt);
     let mut tr = ReaderBuilder::new().has_headers(true).from_reader(tt.as_bytes());
     let th: Vec<String> = tr.headers()?.iter().map(|x| x.to_string()).collect();
-    let ti: HashMap<&str,usize> = th.iter().enumerate().map(|(i,h)|(h.as_str(),i)).collect();
-    let tv_ = |r: &csv::StringRecord, n: &str| -> f64 {
-        ti.get(n).and_then(|&i| r.get(i)).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0)
-    };
+    let species_large_threshold = get_nested_f64(config, "species_rules", "large_order_amount_threshold", 500_000.0);
+    let active_fallback_to_side = get_nested_bool(config, "species_rules", "active_fallback_to_side", true);
+    let active_fallback_hot_amount = get_nested_f64(config, "species_rules", "active_fallback_hot_amount", 100_000.0);
+    let mut trade_rows: Vec<HashMap<String, String>> = Vec::new();
+    for res in tr.records() {
+        let r = match res { Ok(r) => r, Err(_) => continue };
+        trade_rows.push(record_to_map(&th, &r));
+    }
+    let mut lifecycle_resolver = OrderLifecycleResolver::new(&order_rows, &trade_rows);
 
     let mut trade_amounts: Vec<f64> = Vec::new();
     let mut trade_times: Vec<i64> = Vec::new();
     let mut total_volume = 0.0f64;
     let mut bucket_amounts: HashMap<i64, f64> = HashMap::new();
+    let mut pid_buckets: Vec<HashMap<String, String>> = (0..48)
+        .map(|idx| {
+            let mut bucket = HashMap::new();
+            bucket.insert("window_id".into(), idx.to_string());
+            for key in [
+                "deal_amount",
+                "signal_deal_buy_amount",
+                "signal_deal_sell_amount",
+                "CH_rule_t",
+                "Q_rule_t",
+                "R_seed_t",
+                "signed_large_active_amount",
+                "signed_mix_qr_amount",
+                "large_active_buy_amount",
+                "large_active_sell_amount",
+                "small_passive_buy_amount",
+                "small_passive_sell_amount",
+                "unknown_side_amount",
+                "active_non_large_amount",
+                "passive_quant_amount",
+                "passive_retail_amount",
+                "window_open_price",
+                "window_close_price",
+                "window_trade_count",
+                "active_inferred_count",
+                "side_fallback_count",
+                "active_buy_count",
+                "active_sell_count",
+                "active_buy_amount",
+                "active_sell_amount",
+                "order_age_recovered_count",
+                "order_age_missing_count",
+                "order_age_direct_count",
+                "order_age_fifo_count",
+                "order_age_unresolved_count",
+                "pi_max_price_impact_pct",
+            ] {
+                bucket.insert(key.into(), "0".into());
+            }
+            bucket
+        })
+        .collect();
 
-    for res in tr.records() {
-        let r = match res { Ok(r)=>r, Err(_)=>continue };
-        let price = scaled_price(tv_(&r, "\u{6210}\u{4ea4}\u{4ef7}\u{683c}"));
-        let volume = tv_(&r, "\u{6210}\u{4ea4}\u{6570}\u{91cf}");
-        let time = tv_(&r, "\u{65f6}\u{95f4}") as i64;
-        let amount = price * volume;
+    for row in &trade_rows {
+        let trade_type = row.get("\u{6210}\u{4ea4}\u{4ee3}\u{7801}").map(|v| v.trim()).unwrap_or("");
+        let trade_type_upper = trade_type.to_uppercase();
+        if matches!(trade_type_upper.as_str(), "D" | "C" | "CANCEL" | "DELETE") || trade_type.contains('\u{64a4}') {
+            continue;
+        }
+        let price = row
+            .get("\u{6210}\u{4ea4}\u{4ef7}\u{683c}")
+            .or_else(|| row.get("price"))
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(scaled_price)
+            .unwrap_or(0.0);
+        let volume = row
+            .get("\u{6210}\u{4ea4}\u{6570}\u{91cf}")
+            .or_else(|| row.get("volume"))
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let time = row
+            .get("\u{65f6}\u{95f4}")
+            .or_else(|| row.get("time"))
+            .or_else(|| row.get("timestamp_ms"))
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0) as i64;
+        let explicit_amount = row
+            .get("\u{6210}\u{4ea4}\u{91d1}\u{989d}")
+            .or_else(|| row.get("amount"))
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let amount = if explicit_amount > 0.0 { explicit_amount } else { price * volume };
+        if amount <= 0.0 {
+            continue;
+        }
         trade_amounts.push(amount);
         trade_times.push(time);
         total_volume += volume;
@@ -181,6 +519,138 @@ fn build_raw(sd: &Path) -> Result<HashMap<String, f64>> {
         let hhmm = time / 100000;
         let bucket = if hhmm > 0 { hhmm / 5 } else { 0 };
         *bucket_amounts.entry(bucket).or_insert(0.0) += amount;
+
+        let window_id = time_to_window_id(time);
+        if let Some(window_id) = window_id {
+            let side_sign = trade_side_sign_from_row(row);
+            let quote = lookup_quote_at_or_before(time as i32, &qrows);
+            let active_sign = if quote.is_some() {
+                active_side_sign(price, quote, side_sign)
+            } else if active_fallback_to_side {
+                side_sign
+            } else {
+                0
+            };
+            let bucket = &mut pid_buckets[window_id];
+            add_bucket_f64(bucket, "deal_amount", amount);
+            add_bucket_f64(bucket, "window_trade_count", 1.0);
+            if get_bucket_f64(bucket, "window_open_price") <= 0.0 && price > 0.0 {
+                bucket.insert("window_open_price".into(), price.to_string());
+            }
+            if price > 0.0 {
+                bucket.insert("window_close_price".into(), price.to_string());
+            }
+            if active_sign != 0 && quote.is_some() {
+                add_bucket_f64(bucket, "active_inferred_count", 1.0);
+            } else if active_sign != 0 {
+                add_bucket_f64(bucket, "side_fallback_count", 1.0);
+            }
+            let signed_amount = side_sign as f64 * amount;
+            if side_sign > 0 {
+                add_bucket_f64(bucket, "signal_deal_buy_amount", amount);
+            } else if side_sign < 0 {
+                add_bucket_f64(bucket, "signal_deal_sell_amount", amount);
+            }
+            let order_age = lifecycle_resolver.lookup_order_age_minutes(
+                row,
+                row.get("\u{65f6}\u{95f4}")
+                    .or_else(|| row.get("time"))
+                    .or_else(|| row.get("timestamp_ms"))
+                    .map(|v| v.as_str())
+                    .and_then(time_value_to_seconds),
+                active_sign,
+                side_sign,
+                price,
+                volume,
+            );
+            if order_age.order_age_minutes.is_some() {
+                add_bucket_f64(bucket, "order_age_recovered_count", 1.0);
+            } else {
+                add_bucket_f64(bucket, "order_age_missing_count", 1.0);
+            }
+            match order_age.recovery_method.as_str() {
+                "direct_order_id" => add_bucket_f64(bucket, "order_age_direct_count", 1.0),
+                "fifo_price_queue" => add_bucket_f64(bucket, "order_age_fifo_count", 1.0),
+                _ => add_bucket_f64(bucket, "order_age_unresolved_count", 1.0),
+            }
+
+            let is_active = active_sign != 0;
+            let is_price_shaping_active =
+                is_active && is_aggressive_price_shaping(price, quote, active_sign, amount, active_fallback_hot_amount);
+            let is_large_active = qualifies_hot_money(
+                bucket,
+                active_sign,
+                amount,
+                species_large_threshold,
+                active_fallback_hot_amount,
+                is_price_shaping_active,
+                quote.is_some(),
+            );
+            if is_active {
+                if active_sign > 0 {
+                    add_bucket_f64(bucket, "active_buy_count", 1.0);
+                    add_bucket_f64(bucket, "active_buy_amount", amount);
+                } else {
+                    add_bucket_f64(bucket, "active_sell_count", 1.0);
+                    add_bucket_f64(bucket, "active_sell_amount", amount);
+                }
+            }
+            let rule_signed_amount = if is_large_active {
+                active_sign as f64 * amount
+            } else {
+                signed_amount
+            };
+            if is_large_active {
+                add_bucket_f64(bucket, "CH_rule_t", rule_signed_amount);
+                add_bucket_f64(bucket, "signed_large_active_amount", rule_signed_amount);
+                if rule_signed_amount > 0.0 {
+                    add_bucket_f64(bucket, "large_active_buy_amount", amount);
+                } else {
+                    add_bucket_f64(bucket, "large_active_sell_amount", amount);
+                }
+            } else {
+                if !is_active && order_age.order_age_minutes.unwrap_or(0.0) > 5.0 {
+                    add_bucket_f64(bucket, "R_seed_t", rule_signed_amount);
+                    add_bucket_f64(bucket, "passive_retail_amount", rule_signed_amount);
+                } else if is_active || active_fallback_to_side {
+                    let quant_amount = if is_active { active_sign as f64 * amount } else { rule_signed_amount };
+                    add_bucket_f64(bucket, "Q_rule_t", quant_amount);
+                    if is_active {
+                        add_bucket_f64(bucket, "active_non_large_amount", quant_amount);
+                    } else {
+                        add_bucket_f64(bucket, "passive_quant_amount", quant_amount);
+                    }
+                } else {
+                    add_bucket_f64(bucket, "Q_rule_t", rule_signed_amount);
+                    add_bucket_f64(bucket, "passive_quant_amount", rule_signed_amount);
+                }
+                add_bucket_f64(bucket, "signed_mix_qr_amount", signed_amount);
+                if side_sign > 0 {
+                    add_bucket_f64(bucket, "small_passive_buy_amount", amount);
+                } else if side_sign < 0 {
+                    add_bucket_f64(bucket, "small_passive_sell_amount", amount);
+                } else {
+                    add_bucket_f64(bucket, "unknown_side_amount", amount);
+                }
+            }
+        }
+    }
+
+    let mut previous_close = 0.0;
+    for bucket in &mut pid_buckets {
+        let open_price = get_bucket_f64(bucket, "window_open_price");
+        let close_price = get_bucket_f64(bucket, "window_close_price");
+        let impact = if previous_close > 0.0 && close_price > 0.0 {
+            (close_price - previous_close) / previous_close
+        } else if open_price > 0.0 && close_price > 0.0 {
+            (close_price - open_price) / open_price
+        } else {
+            0.0
+        };
+        bucket.insert("pi_max_price_impact_pct".into(), impact.to_string());
+        if close_price > 0.0 {
+            previous_close = close_price;
+        }
     }
 
     let total_trade_amount: f64 = trade_amounts.iter().sum();
@@ -202,41 +672,6 @@ fn build_raw(sd: &Path) -> Result<HashMap<String, f64>> {
     let buy_amount = net_direction.max(0.0) * total_trade_amount;
     let sell_amount = (-net_direction).max(0.0) * total_trade_amount;
     let tail_ratio = if total_trade_amount > 0.0 { tail_trade_amount / total_trade_amount } else { 0.0 };
-
-    // 3. Read orders
-    let mut cancel_ratio = 0.0;
-    let mut order_buy_ratio = 0.5;
-    let mut order_count = 0usize;
-    let op = sd.join("\u{9010}\u{7b14}\u{59d4}\u{6258}.csv");
-    if op.exists() {
-        if let Ok(ob) = fs::read(&op) {
-            let ot = dec(&ob); let ot = ot.strip_prefix('\u{FEFF}').unwrap_or(&ot);
-            let mut or_ = ReaderBuilder::new().has_headers(true).from_reader(ot.as_bytes());
-            if let Ok(hd) = or_.headers() {
-                let oh: Vec<String> = hd.iter().map(|x| x.to_string()).collect();
-                let oi: HashMap<&str,usize> = oh.iter().enumerate().map(|(i,h)|(h.as_str(),i)).collect();
-                let osv = |r: &csv::StringRecord, n: &str| -> String {
-                    oi.get(n).and_then(|&i| r.get(i)).unwrap_or("").trim().to_string()
-                };
-                let mut cancel_like = 0usize;
-                let mut buy_orders = 0usize;
-                let mut sell_orders = 0usize;
-                for res in or_.records() {
-                    let r = match res { Ok(r)=>r, Err(_)=>continue };
-                    order_count += 1;
-                    let otype = osv(&r, "\u{59d4}\u{6258}\u{7c7b}\u{578b}");
-                    let code = osv(&r, "\u{59d4}\u{6258}\u{4ee3}\u{7801}");
-                    if !otype.is_empty() && otype != "0" { cancel_like += 1; }
-                    if code == "B" { buy_orders += 1; }
-                    if code == "S" { sell_orders += 1; }
-                }
-                cancel_ratio = if order_count > 0 { cancel_like as f64 / order_count as f64 } else { 0.0 };
-                order_buy_ratio = if buy_orders + sell_orders > 0 {
-                    buy_orders as f64 / (buy_orders + sell_orders) as f64
-                } else { 0.5 };
-            }
-        }
-    }
 
     // last15_return from quote rows
     let last15_prices: Vec<f64> = qrows.iter()
@@ -278,7 +713,30 @@ fn build_raw(sd: &Path) -> Result<HashMap<String, f64>> {
     s.insert("up_count_market".into(), up_count as f64);
     s.insert("down_count_market".into(), down_count as f64);
     s.insert("flat_count_market".into(), flat_count as f64);
-    Ok(s)
+    let raw_order_age_recovered_count: f64 = pid_buckets.iter().map(|row| get_bucket_f64(row, "order_age_recovered_count")).sum();
+    let raw_order_age_missing_count: f64 = pid_buckets.iter().map(|row| get_bucket_f64(row, "order_age_missing_count")).sum();
+    let raw_order_age_direct_count: f64 = pid_buckets.iter().map(|row| get_bucket_f64(row, "order_age_direct_count")).sum();
+    let raw_order_age_fifo_count: f64 = pid_buckets.iter().map(|row| get_bucket_f64(row, "order_age_fifo_count")).sum();
+    let raw_order_age_unresolved_count: f64 = pid_buckets.iter().map(|row| get_bucket_f64(row, "order_age_unresolved_count")).sum();
+    let raw_order_age_total_count = raw_order_age_recovered_count + raw_order_age_missing_count;
+    s.insert("raw_order_age_recovered_count".into(), raw_order_age_recovered_count);
+    s.insert("raw_order_age_missing_count".into(), raw_order_age_missing_count);
+    s.insert("raw_order_age_direct_count".into(), raw_order_age_direct_count);
+    s.insert("raw_order_age_fifo_count".into(), raw_order_age_fifo_count);
+    s.insert("raw_order_age_unresolved_count".into(), raw_order_age_unresolved_count);
+    s.insert(
+        "raw_order_age_recovery_ratio".into(),
+        if raw_order_age_total_count > 0.0 {
+            raw_order_age_recovered_count / raw_order_age_total_count
+        } else {
+            0.0
+        },
+    );
+    let rows = pid_buckets
+        .into_iter()
+        .filter(|row| row.get("deal_amount").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) > 0.0)
+        .collect();
+    Ok(RawBuildOutput { summary: s, rows })
 }
 
 fn build_ref(_h: &[String], ci: &HashMap<&str,usize>, rows: impl Iterator<Item=csv::StringRecord>) -> HashMap<String,f64> {
@@ -321,7 +779,7 @@ fn build_ref(_h: &[String], ci: &HashMap<&str,usize>, rows: impl Iterator<Item=c
     s
 }
 
-fn load_samples(inp: &Path, td: &str, sl: Option<usize>, so: usize, su: &Option<std::collections::HashSet<String>>)
+fn load_samples(inp: &Path, td: &str, sl: Option<usize>, so: usize, su: &Option<std::collections::HashSet<String>>, cfg: &ConfigMap)
     -> (Vec<DailySample>, HashMap<String,Vec<String>>, Vec<HashMap<String,f64>>)
 {
     let mut smp=Vec::new(); let mut inc=HashMap::new(); let mut stm=Vec::new();
@@ -347,9 +805,18 @@ fn load_samples(inp: &Path, td: &str, sl: Option<usize>, so: usize, su: &Option<
                     for k in &keys {
                         let st=Instant::now(); let rows=sym.remove(k).unwrap_or_default();
                         if rows.is_empty(){continue;}
-                        let sm=build_ref(&hdr,&ci,rows.into_iter()); if sm.is_empty(){continue;}
+                        let sm=build_ref(&hdr,&ci,rows.iter().cloned()); if sm.is_empty(){continue;}
                         let el=st.elapsed().as_secs_f64();
-                        smp.push(DailySample{stock_code:k.clone(),transaction_date:td.into(),rows:Vec::new(),feature_summary:sm,quality_flags:HashMap::new()});
+                        let feature_rows: Vec<HashMap<String, String>> = rows
+                            .iter()
+                            .map(|record| {
+                                hdr.iter()
+                                    .enumerate()
+                                    .map(|(idx, key)| (key.clone(), record.get(idx).unwrap_or("").to_string()))
+                                    .collect()
+                            })
+                            .collect();
+                        smp.push(DailySample{stock_code:k.clone(),transaction_date:td.into(),rows:feature_rows,feature_summary:sm,quality_flags:HashMap::new()});
                         let mut t2=HashMap::new(); t2.insert("sample_build_seconds".into(),rsec(el)); stm.push(t2);
                     }
                 }
@@ -363,9 +830,9 @@ fn load_samples(inp: &Path, td: &str, sl: Option<usize>, so: usize, su: &Option<
         if !ms.is_empty(){inc.insert(d.file_name().unwrap().to_string_lossy().to_string(),ms);continue;}
         let st=Instant::now();
         let sym=d.file_name().unwrap().to_string_lossy().to_uppercase();
-        let sm=match build_raw(d){Ok(s) if !s.is_empty()=>s, _=>{inc.insert(sym.clone(),vec!["no_data".into()]);continue;}};
+        let raw=match build_raw(d, cfg){Ok(s) if !s.summary.is_empty()=>s, _=>{inc.insert(sym.clone(),vec!["no_data".into()]);continue;}};
         let el=st.elapsed().as_secs_f64();
-        smp.push(DailySample{stock_code:sym,transaction_date:td.into(),rows:Vec::new(),feature_summary:sm,quality_flags:HashMap::new()});
+        smp.push(DailySample{stock_code:sym,transaction_date:td.into(),rows:raw.rows,feature_summary:raw.summary,quality_flags:HashMap::new()});
         let mut t2=HashMap::new(); t2.insert("sample_build_seconds".into(),rsec(el)); stm.push(t2);
     }
     (smp,inc,stm)
@@ -378,6 +845,87 @@ fn sort_ord<T>(r: &mut [T], req: &Option<Vec<String>>, kf: impl Fn(&T)->String) 
     }
 }
 
+fn build_market_average_summary(samples: &[DailySample]) -> HashMap<String, f64> {
+    let mut numeric_values: HashMap<String, Vec<f64>> = HashMap::new();
+    for sample in samples {
+        for (key, value) in &sample.feature_summary {
+            numeric_values.entry(key.clone()).or_default().push(*value);
+        }
+    }
+
+    let mut summary = HashMap::new();
+    for (key, mut values) in numeric_values {
+        if values.is_empty() {
+            continue;
+        }
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mid = values.len() / 2;
+        let median = if values.len() % 2 == 0 {
+            (values[mid - 1] + values[mid]) / 2.0
+        } else {
+            values[mid]
+        };
+        summary.insert(key, median);
+    }
+    summary.entry("order_buy_ratio".into()).or_insert(0.5);
+    summary.entry("bid_support".into()).or_insert(0.5);
+    summary.entry("ask_pressure".into()).or_insert(0.5);
+    summary.entry("window_count".into()).or_insert(1.0);
+    summary
+}
+
+fn build_imputed_results(
+    missing_symbols: &[String],
+    trade_date: &str,
+    samples: &[DailySample],
+    cfg: &ConfigMap,
+    ld: &ConfigMap,
+    pid_decomposer: &PIDDecomposer,
+) -> (Vec<PatternResult>, Vec<PredictResult>) {
+    if missing_symbols.is_empty() || samples.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    let market_average_summary = build_market_average_summary(samples);
+    let mut pattern_results = Vec::new();
+    let mut predict_results = Vec::new();
+
+    for symbol in missing_symbols {
+        let default_sample = DailySample {
+            stock_code: symbol.clone(),
+            transaction_date: trade_date.to_string(),
+            rows: Vec::new(),
+            feature_summary: market_average_summary.clone(),
+            quality_flags: HashMap::from([
+                ("has_reference_features".into(), false),
+                ("window_count_ok".into(), false),
+                ("imputed_from_market_average".into(), true),
+            ]),
+        };
+        let pid_result = pid_decomposer.decompose_sample(&default_sample);
+        let mut pattern_result = predict_pattern(&default_sample, cfg, ld, Some(&pid_result));
+        pattern_result.pattern_explanation =
+            format!("{} 缺失原始数据，按当日市场中位水平补全判断。", pattern_result.pattern_explanation);
+        pattern_result.prototype_id = format!("imputed::{}", pattern_result.prototype_id);
+
+        let mut predict_batch = predict_capitals(&default_sample, cfg, ld, &pid_result);
+        for predict_result in &mut predict_batch {
+            predict_result
+                .debug_info
+                .insert("imputed_from_market_average".into(), serde_json::Value::Bool(true));
+            predict_result.debug_info.insert(
+                "imputed_reason".into(),
+                serde_json::Value::String("missing_raw_data".into()),
+            );
+        }
+
+        pattern_results.push(pattern_result);
+        predict_results.extend(predict_batch);
+    }
+
+    (pattern_results, predict_results)
+}
+
 pub fn run_daily_batch(td: &str, inp: &Path, out: &Path, cfg: &ConfigMap, ld: &ConfigMap,
     sl: Option<usize>, so: usize, slf: Option<&Path>, zip: bool, prof: bool)
     -> Result<HashMap<String,serde_json::Value>>
@@ -386,43 +934,70 @@ pub fn run_daily_batch(td: &str, inp: &Path, out: &Path, cfg: &ConfigMap, ld: &C
     let (req,su)=load_universe(slf)?;
     let mut w: Vec<String>=Vec::new(); let mut ms=0.0f64;
     let t1=Instant::now();
-    let (mut smp,inc,stm)=load_samples(inp,td,sl,so,&su);
+    let (mut smp,inc,stm)=load_samples(inp,td,sl,so,&su,cfg);
     let sbs=t1.elapsed().as_secs_f64();
     if smp.is_empty(){w.push("No samples.".into());}
+    let pid_decomposer = PIDDecomposer::new(cfg);
     let t1=Instant::now();
-    let mut pr: Vec<PatternResult>=smp.iter().map(|s|predict_pattern(s,cfg,ld)).collect();
+    let pid_results: HashMap<String, _> = smp
+        .iter()
+        .map(|sample| (sample.stock_code.clone(), pid_decomposer.decompose_sample(sample)))
+        .collect();
+    let pid_secs=t1.elapsed().as_secs_f64();
+    let t1=Instant::now();
+    let mut pr: Vec<PatternResult>=smp.iter().map(|s|predict_pattern(s,cfg,ld,pid_results.get(&s.stock_code))).collect();
     let ps=t1.elapsed().as_secs_f64();
     let t1=Instant::now();
-    let mut pd: Vec<PredictResult>=smp.iter().map(|s|predict_capital(s,cfg,ld)).collect();
-    let cps=t1.elapsed().as_secs_f64();
+    let mut pd: Vec<PredictResult>=Vec::new();
+    for sample in &smp {
+        if let Some(pid_result) = pid_results.get(&sample.stock_code) {
+            pd.extend(predict_capitals(sample,cfg,ld,pid_result));
+        }
+    }
+    let cps=pid_secs + t1.elapsed().as_secs_f64();
     let mut msn: Option<MarketPidSnapshot>=None;
     if !smp.is_empty()&&get_bool(cfg,"enable_market_snapshot",true) {
         let t1=Instant::now();
-        msn=Some(estimate_market_pid(&mut smp,&pr,&pd,cfg));
+        msn=Some(estimate_market_pid(&mut smp,&pid_results,&pr,&pd,cfg));
         if let Some(ref sn)=msn{attach_market_relative_metrics(&smp,&mut pd,sn);}
         ms=t1.elapsed().as_secs_f64();
     }
+    let mut missing_symbols: Vec<String> = Vec::new();
     if let Some(ref rq)=req {
         let act: std::collections::HashSet<String>=smp.iter().map(|s|s.stock_code.to_uppercase()).collect();
-        let mi: Vec<String>=rq.iter().filter(|s|!act.contains(&s.to_uppercase())).cloned().collect();
-        if !mi.is_empty(){w.push(format!("Missing: {}",mi.join(", ")));}
+        missing_symbols = rq.iter().filter(|s|!act.contains(&s.to_uppercase())).cloned().collect();
+        if !missing_symbols.is_empty(){w.push(format!("Missing raw data for requested symbols: {}",missing_symbols.join(", ")));}
     }
     if !inc.is_empty(){
         let mut d: Vec<String>=inc.iter().map(|(s,f)|format!("{}({})",s,f.join(","))).collect();
         d.sort(); w.push(format!("Skipped: {}",d.join("; ")));
     }
+    let (mut imputed_patterns, mut imputed_predicts) = build_imputed_results(&missing_symbols, td, &smp, cfg, ld, &pid_decomposer);
+    if !imputed_patterns.is_empty() {
+        w.push(format!("Imputed missing symbols with market-average defaults: {}", missing_symbols.join(", ")));
+        pr.append(&mut imputed_patterns);
+        pd.append(&mut imputed_predicts);
+    }
     sort_ord(&mut pr,&req,|r|r.stock_code.clone());
     sort_ord(&mut pd,&req,|r|r.stock_code.clone());
     let t1=Instant::now();
-    exporter::export_pattern_reco(&pr,&out.join("pattern_reco.csv"))?;
-    exporter::export_predict_result(&pd,&out.join("predict_result.csv"))?;
-    let (dj,dc)=exporter::export_batch_diagnostics(msn.as_ref(),&pr,&pd,out)?;
+    exporter::export_event_classified_rows(&smp, &out.join("event_classified_rows.csv"))?;
+    exporter::export_window_feature_rows(&smp, &out.join("window_feature_rows.csv"))?;
+    exporter::export_window_flow_rows(&smp, &out.join("pid_window_flow_rows.csv"))?;
+    let mut pid_tail_rows: Vec<&crate::schemas::DecompositionResult> = pid_results.values().collect();
+    pid_tail_rows.sort_by(|a,b| a.stock_code.cmp(&b.stock_code));
+    exporter::export_pid_window_params(&pid_tail_rows, &out.join("pid_window_params.csv"))?;
+    exporter::export_pid_window_contrib(&pid_tail_rows, &out.join("pid_window_contrib.csv"))?;
+    exporter::export_pid_tail_diagnostics(&pid_tail_rows, &out.join("pid_tail_diagnostics.csv"))?;
     let mut msp: Option<String>=None; let mut mrp: Option<String>=None;
     if let Some(ref sn)=msn {
         let sp=out.join("market_pid_snapshot.csv"); let rp=out.join("market_regime_report.md");
         exporter::export_market_pid_snapshot(sn,&sp)?; exporter::export_market_regime_report(sn,&rp)?;
         msp=Some(sp.to_string_lossy().to_string()); mrp=Some(rp.to_string_lossy().to_string());
     }
+    exporter::export_pattern_reco(&pr,&out.join("pattern_reco.csv"))?;
+    exporter::export_predict_result(&pd,&out.join("predict_result.csv"))?;
+    let (dj,dc)=exporter::export_batch_diagnostics(msn.as_ref(),&pr,&pd,out)?;
     let mut es=t1.elapsed().as_secs_f64();
     let mut sz: Option<String>=None;
     if zip {
@@ -454,6 +1029,10 @@ pub fn run_daily_batch(td: &str, inp: &Path, out: &Path, cfg: &ConfigMap, ld: &C
     r.insert("trade_date".into(),serde_json::Value::String(td.into()));
     r.insert("sample_count".into(),serde_json::json!(smp.len()));
     r.insert("output_count".into(),serde_json::json!(pr.len()));
+    r.insert("imputed_output_count".into(), serde_json::json!(missing_symbols.len()));
+    r.insert("stock_offset".into(), serde_json::json!(so));
+    r.insert("stock_limit".into(), sl.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null));
+    r.insert("stock_universe_size".into(), su.as_ref().map(|s| serde_json::json!(s.len())).unwrap_or(serde_json::Value::Null));
     r.insert("warnings".into(),serde_json::Value::Array(w.iter().map(|w|serde_json::Value::String(w.clone())).collect()));
     if let Some(z)=sz{r.insert("submit_zip".into(),serde_json::Value::String(z));}
     if let Some(p)=msp{r.insert("market_snapshot_path".into(),serde_json::Value::String(p));}

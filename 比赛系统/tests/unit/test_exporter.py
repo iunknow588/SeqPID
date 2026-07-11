@@ -12,15 +12,19 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from exporter import (
+    export_pid_tail_diagnostics,
     build_submit_zip,
     export_batch_diagnostics,
+    export_market_pid_validation_report,
     export_market_pid_snapshot,
     export_market_regime_report,
     export_pattern_reco,
     export_predict_result,
+    export_replay_validation_report,
     validate_submission_files,
 )
 from schemas import MarketPidSnapshot, PatternResult, PredictResult
+from pid_decomposer import DecompositionResult
 
 
 class ExporterTest(unittest.TestCase):
@@ -148,6 +152,67 @@ class ExporterTest(unittest.TestCase):
             with Path(csv_path).open("r", encoding="utf-8-sig", newline="") as fh:
                 rows = list(csv.reader(fh))
             self.assertEqual(rows[0], ["category", "label", "count", "ratio"])
+
+    def test_export_validation_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            snapshot = MarketPidSnapshot(
+                trade_date="20260710",
+                up_count=10,
+                down_count=5,
+                breadth_ratio=2.0,
+                breadth_balance=0.3333,
+                p_mean=0.12,
+                p_median=0.11,
+                p_std=0.05,
+                i_mean=0.22,
+                i_median=0.20,
+                i_std=0.08,
+                d_mean=0.31,
+                d_median=0.30,
+                d_std=0.09,
+                market_regime="strong_uptrend",
+                diagnostics={"sample_count": 2},
+            )
+
+            market_report = export_market_pid_validation_report(snapshot, base)
+            replay_report = export_replay_validation_report(
+                {
+                    "trade_date": "20260710",
+                    "sample_count": 2,
+                    "output_count": 2,
+                    "imputed_output_count": 0,
+                    "warnings": [],
+                    "missing_symbols": [],
+                    "incomplete_stock_dirs": {},
+                    "performance_summary": {"total_seconds": 1.2},
+                },
+                base,
+            )
+
+            self.assertTrue(Path(market_report).exists())
+            self.assertTrue(Path(replay_report).exists())
+            self.assertIn("Market PID Validation Report", Path(market_report).read_text(encoding="utf-8"))
+            self.assertIn("100 Stock Replay Report", Path(replay_report).read_text(encoding="utf-8"))
+
+    def test_export_pid_tail_diagnostics_includes_beta_mix_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            result = DecompositionResult(
+                stock_code="000001.SZ",
+                transaction_date="20260710",
+            )
+            result.mode = "baseline_4d"
+            result.beta_mix[-1] = 0.123456
+            result.beta_q[-1] = 0.111111
+            result.beta_retail[-1] = 0.012345
+            export_pid_tail_diagnostics([result], base / "pid_tail_diagnostics.csv")
+
+            with (base / "pid_tail_diagnostics.csv").open("r", encoding="utf-8-sig", newline="") as fh:
+                rows = list(csv.reader(fh))
+            self.assertIn("beta_mix_tail", rows[0])
+            beta_mix_index = rows[0].index("beta_mix_tail")
+            self.assertEqual(rows[1][beta_mix_index], "0.123456")
 
     def test_validate_submission_files_rejects_duplicate_stock_date(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

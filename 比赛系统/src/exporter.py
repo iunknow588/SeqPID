@@ -6,7 +6,7 @@ import zipfile
 from collections import Counter
 from pathlib import Path
 
-from schemas import MarketPidSnapshot, PatternResult, PredictResult
+from schemas import DailySample, MarketPidSnapshot, PatternResult, PredictResult
 
 
 PATTERN_COLUMNS = ["stock_code", "transaction_date", "pattern_type", "pattern_explanation"]
@@ -29,6 +29,139 @@ MARKET_SNAPSHOT_COLUMNS = [
     "market_regime",
 ]
 SUMMARY_COLUMNS = ["category", "label", "count", "ratio"]
+EVENT_CLASSIFIED_COLUMNS = [
+    "trade_date",
+    "symbol",
+    "event_id",
+    "event_time",
+    "window_id",
+    "side",
+    "signed_amount",
+    "capital_type_rule",
+    "confidence_score",
+    "reason_codes",
+]
+WINDOW_FEATURE_COLUMNS = [
+    "trade_date",
+    "symbol",
+    "window_id",
+    "window_start",
+    "window_end",
+    "open_price",
+    "close_price",
+    "vwap",
+    "deal_amount",
+    "data_P",
+    "data_P_source",
+]
+PID_TAIL_COLUMNS = [
+    "stock_code",
+    "transaction_date",
+    "mode",
+    "kf_converged",
+    "dominant_type",
+    "dominant_intention",
+    "hot_money_ratio",
+    "quant_ratio",
+    "retail_ratio",
+    "phi_tail",
+    "theta_tail",
+    "beta_ch_tail",
+    "beta_mix_tail",
+    "beta_q_tail",
+    "beta_retail_tail",
+    "c_p_tail",
+    "c_i_tail",
+    "c_d_tail",
+    "capital_ch_tail",
+    "capital_q_tail",
+    "capital_retail_tail",
+    "capital_anchor_error_tail",
+    "noise_ratio_tail",
+    "explain_ratio_tail",
+    "capital_identity_error",
+    "closure_error",
+    "warnings",
+]
+PID_WINDOW_PARAM_COLUMNS = [
+    "stock_code",
+    "transaction_date",
+    "window_id",
+    "mode_name",
+    "phi",
+    "beta_ch",
+    "beta_q",
+    "beta_retail",
+    "beta_mix",
+    "theta",
+    "covariance_diag",
+]
+PID_WINDOW_CONTRIB_COLUMNS = [
+    "stock_code",
+    "transaction_date",
+    "window_id",
+    "c_p",
+    "c_i",
+    "c_d",
+    "eps",
+    "capital_ch",
+    "capital_q",
+    "capital_retail",
+    "capital_mix",
+    "noise_ratio",
+    "explain_ratio",
+    "capital_anchor_error",
+    "closure_error",
+]
+WINDOW_FLOW_COLUMNS = [
+    "stock_code",
+    "transaction_date",
+    "window_id",
+]
+
+
+def _round6(value: float) -> float:
+    return round(float(value), 6)
+
+
+def _tail_value(values: object) -> str:
+    try:
+        iterable = list(values)  # numpy arrays and lists are both supported.
+    except TypeError:
+        return ""
+    for value in reversed(iterable):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if numeric == numeric:
+            return str(_round6(numeric))
+    return ""
+
+
+def _series_len(result: object, names: list[str]) -> int:
+    max_len = 0
+    for name in names:
+        try:
+            max_len = max(max_len, len(getattr(result, name, [])))
+        except TypeError:
+            continue
+    return max_len
+
+
+def _series_value(result: object, name: str, index: int, default: float = 0.0) -> float:
+    values = getattr(result, name, [])
+    try:
+        value = values[index]
+    except (TypeError, IndexError):
+        return default
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    if numeric != numeric:
+        return default
+    return numeric
 
 
 def _submission_date(default_date: str, submit_date_override: str | None = None) -> str:
@@ -40,6 +173,105 @@ def _submission_date(default_date: str, submit_date_override: str | None = None)
 
 def _submission_stock_code(stock_code: str) -> str:
     return str(stock_code).strip()
+
+
+def _window_bounds(window_id: int) -> tuple[str, str]:
+    if window_id < 24:
+        start_minutes = 9 * 60 + 30 + window_id * 5
+    else:
+        start_minutes = 13 * 60 + (window_id - 24) * 5
+    end_minutes = start_minutes + 5
+    return f"{start_minutes // 60:02d}:{start_minutes % 60:02d}", f"{end_minutes // 60:02d}:{end_minutes % 60:02d}"
+
+
+def _row_float(row: dict, keys: list[str], default: float = 0.0) -> float:
+    for key in keys:
+        if key not in row:
+            continue
+        try:
+            return float(row.get(key) or default)
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def export_event_classified_rows(samples: list[DailySample], output_path: str | Path) -> None:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    capital_fields = [
+        ("CH_rule_t", "hot_money"),
+        ("Q_rule_t", "quant"),
+        ("R_seed_t", "retail"),
+    ]
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(EVENT_CLASSIFIED_COLUMNS)
+        for sample in sorted(samples, key=lambda item: (item.stock_code, item.transaction_date)):
+            for row in sample.rows or []:
+                window_raw = row.get("window_id", "")
+                try:
+                    window_id = int(float(window_raw))
+                except (TypeError, ValueError):
+                    continue
+                for field_name, capital_type in capital_fields:
+                    signed_amount = _row_float(row, [field_name], 0.0)
+                    if signed_amount == 0.0:
+                        continue
+                    side = "buy" if signed_amount > 0 else "sell"
+                    event_id = f"{sample.stock_code}-{sample.transaction_date}-{window_id:02d}-{capital_type}"
+                    writer.writerow(
+                        [
+                            sample.transaction_date,
+                            sample.stock_code,
+                            event_id,
+                            "",
+                            window_id,
+                            side,
+                            _round6(signed_amount),
+                            capital_type,
+                            "",
+                            "window_aggregate",
+                        ]
+                    )
+
+
+def export_window_feature_rows(samples: list[DailySample], output_path: str | Path) -> None:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(WINDOW_FEATURE_COLUMNS)
+        for sample in sorted(samples, key=lambda item: (item.stock_code, item.transaction_date)):
+            data_source = "reference_feature" if sample.quality_flags.get("has_reference_features") else "trade_window"
+            seen_windows: set[int] = set()
+            for row in sample.rows or []:
+                try:
+                    window_id = int(float(row.get("window_id", 0) or 0))
+                except (TypeError, ValueError):
+                    continue
+                if window_id in seen_windows:
+                    continue
+                seen_windows.add(window_id)
+                window_start, window_end = _window_bounds(window_id)
+                open_price = _row_float(row, ["window_open_price", "open_price"], 0.0)
+                close_price = _row_float(row, ["window_close_price", "close_price"], 0.0)
+                deal_amount = _row_float(row, ["deal_amount", "amount", "成交额"], 0.0)
+                data_p = _row_float(row, ["data_P", "delta_p", "pi_max_price_impact_pct", "price_impact"], 0.0)
+                writer.writerow(
+                    [
+                        sample.transaction_date,
+                        sample.stock_code,
+                        window_id,
+                        window_start,
+                        window_end,
+                        _round6(open_price),
+                        _round6(close_price),
+                        "",
+                        _round6(deal_amount),
+                        _round6(data_p),
+                        data_source,
+                    ]
+                )
 
 
 def export_pattern_reco(
@@ -196,6 +428,287 @@ def export_batch_diagnostics(
                 writer.writerow([category, label, count, round(count / total, 6)])
 
     return str(json_path), str(csv_path)
+
+
+def export_pid_tail_diagnostics(pid_results: list[object], output_path: str | Path) -> None:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(PID_TAIL_COLUMNS)
+        for result in sorted(pid_results, key=lambda item: getattr(item, "stock_code", "")):
+            writer.writerow(
+                [
+                    getattr(result, "stock_code", ""),
+                    getattr(result, "transaction_date", ""),
+                    getattr(result, "mode", ""),
+                    "true" if bool(getattr(result, "kf_converged", False)) else "false",
+                    getattr(result, "dominant_type", ""),
+                    getattr(result, "dominant_intention", ""),
+                    _round6(getattr(result, "hot_money_ratio", 0.0)),
+                    _round6(getattr(result, "quant_ratio", 0.0)),
+                    _round6(getattr(result, "retail_ratio", 0.0)),
+                    _tail_value(getattr(result, "phi", [])),
+                    _tail_value(getattr(result, "theta", [])),
+                    _tail_value(getattr(result, "beta_ch", [])),
+                    _tail_value(getattr(result, "beta_mix", [])),
+                    _tail_value(getattr(result, "beta_q", [])),
+                    _tail_value(getattr(result, "beta_retail", [])),
+                    _tail_value(getattr(result, "c_p", [])),
+                    _tail_value(getattr(result, "c_i", [])),
+                    _tail_value(getattr(result, "c_d", [])),
+                    _tail_value(getattr(result, "capital_ch", [])),
+                    _tail_value(getattr(result, "capital_q", [])),
+                    _tail_value(getattr(result, "capital_retail", [])),
+                    _tail_value(getattr(result, "capital_anchor_error", [])),
+                    _tail_value(getattr(result, "noise_ratio", [])),
+                    _tail_value(getattr(result, "explain_ratio", [])),
+                    f"{float(getattr(result, 'capital_identity_error', 0.0)):.2e}",
+                    f"{float(getattr(result, 'closure_error', 0.0)):.2e}",
+                    " | ".join(getattr(result, "warnings", [])),
+                ]
+            )
+
+
+def export_pid_window_params(pid_results: list[object], output_path: str | Path) -> None:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(PID_WINDOW_PARAM_COLUMNS)
+        for result in sorted(pid_results, key=lambda item: (getattr(item, "stock_code", ""), getattr(item, "transaction_date", ""))):
+            row_count = _series_len(result, ["phi", "beta_ch", "beta_q", "beta_retail", "beta_mix", "theta"])
+            for window_id in range(row_count):
+                writer.writerow(
+                    [
+                        getattr(result, "stock_code", ""),
+                        getattr(result, "transaction_date", ""),
+                        window_id,
+                        getattr(result, "mode", ""),
+                        _round6(_series_value(result, "phi", window_id)),
+                        _round6(_series_value(result, "beta_ch", window_id)),
+                        _round6(_series_value(result, "beta_q", window_id)),
+                        _round6(_series_value(result, "beta_retail", window_id)),
+                        _round6(_series_value(result, "beta_mix", window_id)),
+                        _round6(_series_value(result, "theta", window_id)),
+                        "",
+                    ]
+                )
+
+
+def export_pid_window_contrib(pid_results: list[object], output_path: str | Path) -> None:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(PID_WINDOW_CONTRIB_COLUMNS)
+        for result in sorted(pid_results, key=lambda item: (getattr(item, "stock_code", ""), getattr(item, "transaction_date", ""))):
+            row_count = _series_len(
+                result,
+                [
+                    "c_p",
+                    "c_i",
+                    "c_d",
+                    "eps",
+                    "capital_ch",
+                    "capital_q",
+                    "capital_retail",
+                    "noise_ratio",
+                    "explain_ratio",
+                    "capital_anchor_error",
+                ],
+            )
+            for window_id in range(row_count):
+                c_p = _series_value(result, "c_p", window_id)
+                capital_ch = _series_value(result, "capital_ch", window_id)
+                capital_q = _series_value(result, "capital_q", window_id)
+                capital_retail = _series_value(result, "capital_retail", window_id)
+                capital_mix = c_p - capital_ch
+                writer.writerow(
+                    [
+                        getattr(result, "stock_code", ""),
+                        getattr(result, "transaction_date", ""),
+                        window_id,
+                        _round6(c_p),
+                        _round6(_series_value(result, "c_i", window_id)),
+                        _round6(_series_value(result, "c_d", window_id)),
+                        _round6(_series_value(result, "eps", window_id)),
+                        _round6(capital_ch),
+                        _round6(capital_q),
+                        _round6(capital_retail),
+                        _round6(capital_mix),
+                        _round6(_series_value(result, "noise_ratio", window_id, 1.0)),
+                        _round6(_series_value(result, "explain_ratio", window_id)),
+                        _round6(_series_value(result, "capital_anchor_error", window_id)),
+                        f"{float(getattr(result, 'pid_closure_error', getattr(result, 'closure_error', 0.0))):.2e}",
+                    ]
+                )
+
+
+def export_window_flow_rows(samples: list[DailySample], output_path: str | Path) -> None:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, object]] = []
+    fieldnames: list[str] = list(WINDOW_FLOW_COLUMNS)
+
+    for sample in sorted(samples, key=lambda item: (item.stock_code, item.transaction_date)):
+        for row in sample.rows or []:
+            merged = {
+                "stock_code": sample.stock_code,
+                "transaction_date": sample.transaction_date,
+                **row,
+            }
+            rows.append(merged)
+            for key in merged.keys():
+                if key not in fieldnames:
+                    fieldnames.append(key)
+
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+
+def export_market_pid_validation_report(snapshot: MarketPidSnapshot | None, output_dir: str | Path) -> str:
+    base = Path(output_dir) / "reports" / "validation"
+    base.mkdir(parents=True, exist_ok=True)
+    report_path = base / "market_pid_validation_report.md"
+
+    lines = [
+        "# Market PID Validation Report",
+        "",
+        "## Scope",
+        "",
+        "This report records the market breadth and relative market PID口径 used by the current batch.",
+        "",
+    ]
+    if snapshot is None:
+        lines.extend(
+            [
+                "## Status",
+                "",
+                "- market_snapshot: `missing`",
+                "- reason: no valid samples were available for market PID aggregation.",
+                "",
+            ]
+        )
+    else:
+        diagnostics = snapshot.diagnostics or {}
+        lines.extend(
+            [
+                "## Market Breadth",
+                "",
+                f"- trade_date: `{snapshot.trade_date}`",
+                f"- up_count: `{snapshot.up_count}`",
+                f"- down_count: `{snapshot.down_count}`",
+                f"- breadth_ratio: `{snapshot.breadth_ratio:.6f}`",
+                f"- breadth_balance: `{snapshot.breadth_balance:.6f}`",
+                f"- market_regime: `{snapshot.market_regime}`",
+                "",
+                "## PID Aggregates",
+                "",
+                f"- p_mean / p_median / p_std: `{snapshot.p_mean:.6f}` / `{snapshot.p_median:.6f}` / `{snapshot.p_std:.6f}`",
+                f"- i_mean / i_median / i_std: `{snapshot.i_mean:.6f}` / `{snapshot.i_median:.6f}` / `{snapshot.i_std:.6f}`",
+                f"- d_mean / d_median / d_std: `{snapshot.d_mean:.6f}` / `{snapshot.d_median:.6f}` / `{snapshot.d_std:.6f}`",
+                "",
+                "## Aggregation Contract",
+                "",
+                "- preferred source: per-stock `c_p / c_i / c_d` from PID decomposition",
+                "- fallback source: heuristic summary only when PID components are unavailable",
+                "- rule-layer flows such as `Q_rule / R_seed` are not treated as market external-force outputs",
+                "",
+                "## Relative Metrics Contract",
+                "",
+                "- `p_rel_market = (p_value - p_median) / max(p_std, eps)`",
+                "- `i_rel_market = (i_value - i_median) / max(i_std, eps)`",
+                "- `d_rel_market = (d_value - d_median) / max(d_std, eps)`",
+                "- `trend_vs_market` is diagnostic only and does not change submission CSV columns.",
+                "",
+                "## Diagnostics",
+                "",
+                "```json",
+                json.dumps(diagnostics, ensure_ascii=False, indent=2),
+                "```",
+                "",
+            ]
+        )
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return str(report_path)
+
+
+def export_replay_validation_report(batch_summary: dict, output_dir: str | Path) -> str:
+    base = Path(output_dir) / "reports" / "validation"
+    base.mkdir(parents=True, exist_ok=True)
+    report_path = base / "100_stock_replay_report.md"
+    performance = batch_summary.get("performance_summary") or {}
+    lifecycle = batch_summary.get("order_lifecycle_summary") or {}
+    warnings = batch_summary.get("warnings") or []
+    missing_symbols = batch_summary.get("missing_symbols") or []
+    incomplete_stock_dirs = batch_summary.get("incomplete_stock_dirs") or {}
+
+    lines = [
+        "# 100 Stock Replay Report",
+        "",
+        "## Batch Summary",
+        "",
+        f"- trade_date: `{batch_summary.get('trade_date', '')}`",
+        f"- sample_count: `{batch_summary.get('sample_count', 0)}`",
+        f"- output_count: `{batch_summary.get('output_count', 0)}`",
+        f"- imputed_output_count: `{batch_summary.get('imputed_output_count', 0)}`",
+        f"- stock_universe_size: `{batch_summary.get('stock_universe_size')}`",
+        f"- stock_list_file: `{batch_summary.get('stock_list_file')}`",
+        f"- stock_offset: `{batch_summary.get('stock_offset', 0)}`",
+        f"- stock_limit: `{batch_summary.get('stock_limit')}`",
+        "",
+        "## Missing And Imputed Symbols",
+        "",
+        f"- missing_symbol_count: `{len(missing_symbols)}`",
+        f"- missing_symbols: `{', '.join(missing_symbols) if missing_symbols else ''}`",
+        f"- incomplete_stock_dir_count: `{len(incomplete_stock_dirs)}`",
+        "",
+        "## Warnings",
+        "",
+    ]
+    if warnings:
+        lines.extend(f"- {warning}" for warning in warnings)
+    else:
+        lines.append("- none")
+
+    lines.extend(
+        [
+            "",
+            "## Performance",
+            "",
+            f"- total_seconds: `{performance.get('total_seconds')}`",
+            f"- sample_build_seconds: `{performance.get('sample_build_seconds')}`",
+            f"- pattern_seconds: `{performance.get('pattern_seconds')}`",
+            f"- capital_seconds: `{performance.get('capital_seconds')}`",
+            f"- market_seconds: `{performance.get('market_seconds')}`",
+            f"- export_seconds: `{performance.get('export_seconds')}`",
+            "",
+            "## Order Lifecycle Recovery",
+            "",
+            f"- order_age_total_count: `{lifecycle.get('order_age_total_count')}`",
+            f"- order_age_recovered_count: `{lifecycle.get('order_age_recovered_count')}`",
+            f"- order_age_missing_count: `{lifecycle.get('order_age_missing_count')}`",
+            f"- order_age_direct_count: `{lifecycle.get('order_age_direct_count')}`",
+            f"- order_age_fifo_count: `{lifecycle.get('order_age_fifo_count')}`",
+            f"- order_age_unresolved_count: `{lifecycle.get('order_age_unresolved_count')}`",
+            f"- order_age_recovery_ratio: `{lifecycle.get('order_age_recovery_ratio')}`",
+            "",
+            "## Output Files",
+            "",
+            f"- market_snapshot_path: `{batch_summary.get('market_snapshot_path')}`",
+            f"- market_report_path: `{batch_summary.get('market_report_path')}`",
+            f"- diagnostics_json_path: `{batch_summary.get('diagnostics_json_path')}`",
+            f"- distribution_csv_path: `{batch_summary.get('distribution_csv_path')}`",
+            f"- submit_zip: `{batch_summary.get('submit_zip')}`",
+            "",
+        ]
+    )
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return str(report_path)
 
 
 def validate_submission_files(pattern_path: str | Path, predict_path: str | Path) -> None:

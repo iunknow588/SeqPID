@@ -1,4 +1,4 @@
-﻿use crate::schemas::{DailySample, MarketPidSnapshot, PatternResult, PredictResult};
+use crate::schemas::{DailySample, DecompositionResult, MarketPidSnapshot, PatternResult, PredictResult};
 use std::collections::HashMap;
 
 const REGIME_STRONG_UP: &str = "强趋势上涨";
@@ -15,12 +15,16 @@ const TREND_RESILIENT: &str = "抗跌";
 const TREND_NOISY: &str = "高噪声扰动";
 
 fn safe_mean(values: &[f64]) -> f64 {
-    if values.is_empty() { return 0.0; }
+    if values.is_empty() {
+        return 0.0;
+    }
     values.iter().sum::<f64>() / values.len() as f64
 }
 
 fn safe_median(values: &[f64]) -> f64 {
-    if values.is_empty() { return 0.0; }
+    if values.is_empty() {
+        return 0.0;
+    }
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = sorted.len();
@@ -32,7 +36,9 @@ fn safe_median(values: &[f64]) -> f64 {
 }
 
 fn safe_std(values: &[f64]) -> f64 {
-    if values.len() <= 1 { return 0.0; }
+    if values.len() <= 1 {
+        return 0.0;
+    }
     let m = safe_mean(values);
     let variance = values.iter().map(|x| (x - m).powi(2)).sum::<f64>() / values.len() as f64;
     variance.sqrt()
@@ -60,15 +66,18 @@ fn regime_from_scores(breadth_balance: f64, p_median: f64, i_median: f64, d_medi
 
 pub fn estimate_market_pid(
     samples: &mut [DailySample],
+    pid_results: &HashMap<String, DecompositionResult>,
     pattern_results: &[PatternResult],
     predict_results: &[PredictResult],
     _config: &HashMap<String, serde_yaml::Value>,
 ) -> MarketPidSnapshot {
-    let mut p_values: Vec<f64> = Vec::new();
-    let mut i_values: Vec<f64> = Vec::new();
-    let mut d_values: Vec<f64> = Vec::new();
+    let mut p_values = Vec::new();
+    let mut i_values = Vec::new();
+    let mut d_values = Vec::new();
     let mut up_count: i64 = 0;
     let mut down_count: i64 = 0;
+    let mut pid_result_source_count = 0usize;
+    let mut heuristic_fallback_source_count = 0usize;
 
     let mut pattern_counts: HashMap<String, i64> = HashMap::new();
     let mut capital_counts: HashMap<String, i64> = HashMap::new();
@@ -92,21 +101,54 @@ pub fn estimate_market_pid(
         let bid_support = summary.get("bid_support").copied().unwrap_or(0.0);
         let ask_pressure = summary.get("ask_pressure").copied().unwrap_or(0.0);
 
-        let p_value = clamp(
-            net_direction * 0.6 + (price_impact / 0.02).min(1.0) * 0.25 + tail_ratio * 0.15,
-            -1.0, 1.0,
-        );
-        let i_value = clamp(
-            burst_ratio * 0.55 + net_direction.max(0.0) * 0.25 + tail_ratio * 0.20,
-            -1.0, 1.0,
-        );
-        let d_value = clamp(
-            cancel_ratio * 0.50 + (ask_pressure - bid_support).max(0.0) * 0.30 + (1.0 - net_direction.abs()) * 0.20,
-            0.0, 1.0,
-        );
+        let (p_value, i_value, d_value, is_pid_based) =
+            if let Some(pid_result) = pid_results.get(&sample.stock_code) {
+                let p_series = if pid_result.c_p.is_empty() {
+                    &pid_result.capital_ch
+                } else {
+                    &pid_result.c_p
+                };
+                let i_series = if pid_result.c_i.is_empty() {
+                    &pid_result.capital_retail
+                } else {
+                    &pid_result.c_i
+                };
+                let d_series = if pid_result.c_d.is_empty() {
+                    &pid_result.capital_q
+                } else {
+                    &pid_result.c_d
+                };
+                pid_result_source_count += 1;
+                (
+                    clamp(tail_or_mean(p_series), -1.0, 1.0),
+                    clamp(tail_or_mean(i_series), -1.0, 1.0),
+                    clamp(tail_or_mean(d_series).abs(), 0.0, 1.0),
+                    true,
+                )
+            } else {
+                heuristic_fallback_source_count += 1;
+                (
+                    clamp(
+                        net_direction * 0.6 + (price_impact / 0.02).min(1.0) * 0.25 + tail_ratio * 0.15,
+                        -1.0,
+                        1.0,
+                    ),
+                    clamp(
+                        burst_ratio * 0.55 + net_direction.max(0.0) * 0.25 + tail_ratio * 0.20,
+                        -1.0,
+                        1.0,
+                    ),
+                    clamp(
+                        cancel_ratio * 0.50
+                            + (ask_pressure - bid_support).max(0.0) * 0.30
+                            + (1.0 - net_direction.abs()) * 0.20,
+                        0.0,
+                        1.0,
+                    ),
+                    false,
+                )
+            };
 
-        // We need to insert these into the sample's feature_summary
-        // but we can't borrow mutably while iterating, so we'll collect and set later
         p_values.push(p_value);
         i_values.push(i_value);
         d_values.push(d_value);
@@ -116,9 +158,11 @@ pub fn estimate_market_pid(
         } else if net_direction < 0.0 {
             down_count += 1;
         }
+        sample
+            .quality_flags
+            .insert("market_pid_from_pid_result".into(), is_pid_based);
     }
 
-    // Now set p/i/d values back into samples
     for (idx, sample) in samples.iter_mut().enumerate() {
         if idx < p_values.len() {
             sample.feature_summary.insert("p_value".into(), p_values[idx]);
@@ -127,7 +171,6 @@ pub fn estimate_market_pid(
         }
     }
 
-    // Check for market up/down counts from feature summaries
     let market_up_candidates: Vec<i64> = samples
         .iter()
         .filter_map(|s| s.feature_summary.get("up_count_market"))
@@ -172,29 +215,42 @@ pub fn estimate_market_pid(
     let d_mean = safe_mean(&d_values);
     let d_median = safe_median(&d_values);
     let d_std = safe_std(&d_values);
-
     let market_regime = regime_from_scores(breadth_balance, p_median, i_median, d_median);
 
     let mut diag = serde_json::Map::new();
     diag.insert("sample_count".into(), serde_json::Value::Number(samples.len().into()));
+    diag.insert(
+        "pid_result_source_count".into(),
+        serde_json::Value::Number(pid_result_source_count.into()),
+    );
+    diag.insert(
+        "heuristic_fallback_source_count".into(),
+        serde_json::Value::Number(heuristic_fallback_source_count.into()),
+    );
 
-    let pc: serde_json::Map<String, serde_json::Value> = pattern_counts.iter()
+    let pc: serde_json::Map<String, serde_json::Value> = pattern_counts
+        .iter()
         .map(|(k, v)| (k.clone(), serde_json::Value::Number((*v).into())))
         .collect();
     diag.insert("pattern_counts".into(), serde_json::Value::Object(pc));
 
-    let cc: serde_json::Map<String, serde_json::Value> = capital_counts.iter()
+    let cc: serde_json::Map<String, serde_json::Value> = capital_counts
+        .iter()
         .map(|(k, v)| (k.clone(), serde_json::Value::Number((*v).into())))
         .collect();
     diag.insert("capital_counts".into(), serde_json::Value::Object(cc));
 
-    let ic: serde_json::Map<String, serde_json::Value> = intention_counts.iter()
+    let ic: serde_json::Map<String, serde_json::Value> = intention_counts
+        .iter()
         .map(|(k, v)| (k.clone(), serde_json::Value::Number((*v).into())))
         .collect();
     diag.insert("intention_counts".into(), serde_json::Value::Object(ic));
 
     MarketPidSnapshot {
-        trade_date: samples.first().map(|s| s.transaction_date.clone()).unwrap_or_default(),
+        trade_date: samples
+            .first()
+            .map(|sample| sample.transaction_date.clone())
+            .unwrap_or_default(),
         up_count,
         down_count,
         breadth_ratio,
@@ -218,7 +274,7 @@ pub fn attach_market_relative_metrics(
     predict_results: &mut [PredictResult],
     snapshot: &MarketPidSnapshot,
 ) {
-    let sample_map: HashMap<String, &DailySample> = samples.iter().map(|s| (s.stock_code.clone(), s)).collect();
+    let sample_map: HashMap<String, &DailySample> = samples.iter().map(|sample| (sample.stock_code.clone(), sample)).collect();
     let p_std = if snapshot.p_std > 1e-8 { snapshot.p_std } else { 1.0 };
     let i_std = if snapshot.i_std > 1e-8 { snapshot.i_std } else { 1.0 };
     let d_std = if snapshot.d_std > 1e-8 { snapshot.d_std } else { 1.0 };
@@ -237,25 +293,75 @@ pub fn attach_market_relative_metrics(
 
             let regime = &snapshot.market_regime;
             let trend_vs_market = if regime == REGIME_STRONG_UP || regime == REGIME_WEAK_UP {
-                if trend_score > 0.8 { TREND_STRONGER }
-                else if trend_score > -0.3 { TREND_FOLLOW }
-                else { TREND_WEAKER }
+                if trend_score > 0.8 {
+                    TREND_STRONGER
+                } else if trend_score > -0.3 {
+                    TREND_FOLLOW
+                } else {
+                    TREND_WEAKER
+                }
             } else if regime == REGIME_WEAK_DOWN || regime == REGIME_RISK_OFF {
-                if trend_score > 0.8 { TREND_COUNTER }
-                else if trend_score > 0.0 { TREND_RESILIENT }
-                else { TREND_WEAKER }
+                if trend_score > 0.8 {
+                    TREND_COUNTER
+                } else if trend_score > 0.0 {
+                    TREND_RESILIENT
+                } else {
+                    TREND_WEAKER
+                }
+            } else if trend_score > 0.8 {
+                TREND_STRONGER
+            } else if d_rel > 1.0 {
+                TREND_NOISY
             } else {
-                if trend_score > 0.8 { TREND_STRONGER }
-                else if d_rel > 1.0 { TREND_NOISY }
-                else { TREND_FOLLOW }
+                TREND_FOLLOW
             };
 
-            let round4 = |v: f64| (v * 10000.0).round() / 10000.0;
-            result.debug_info.insert("p_rel_market".into(), serde_json::Value::Number(serde_json::Number::from_f64(round4(p_rel)).unwrap()));
-            result.debug_info.insert("i_rel_market".into(), serde_json::Value::Number(serde_json::Number::from_f64(round4(i_rel)).unwrap()));
-            result.debug_info.insert("d_rel_market".into(), serde_json::Value::Number(serde_json::Number::from_f64(round4(d_rel)).unwrap()));
-            result.debug_info.insert("trend_vs_market".into(), serde_json::Value::String(trend_vs_market.to_string()));
-            result.debug_info.insert("market_regime".into(), serde_json::Value::String(regime.clone()));
+            let round4 = |value: f64| (value * 10000.0).round() / 10000.0;
+            result.debug_info.insert(
+                "p_rel_market".into(),
+                serde_json::Value::Number(serde_json::Number::from_f64(round4(p_rel)).unwrap()),
+            );
+            result.debug_info.insert(
+                "i_rel_market".into(),
+                serde_json::Value::Number(serde_json::Number::from_f64(round4(i_rel)).unwrap()),
+            );
+            result.debug_info.insert(
+                "d_rel_market".into(),
+                serde_json::Value::Number(serde_json::Number::from_f64(round4(d_rel)).unwrap()),
+            );
+            result.debug_info.insert(
+                "trend_vs_market".into(),
+                serde_json::Value::String(trend_vs_market.to_string()),
+            );
+            result.debug_info.insert(
+                "market_regime".into(),
+                serde_json::Value::String(regime.clone()),
+            );
+            result.debug_info.insert(
+                "market_pid_source".into(),
+                serde_json::Value::String(
+                    if sample
+                        .quality_flags
+                        .get("market_pid_from_pid_result")
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        "pid_result"
+                    } else {
+                        "heuristic_fallback"
+                    }
+                    .to_string(),
+                ),
+            );
         }
     }
+}
+
+fn tail_or_mean(values: &[f64]) -> f64 {
+    values
+        .iter()
+        .rev()
+        .copied()
+        .find(|value| value.is_finite() && value.abs() > 1e-12)
+        .unwrap_or_else(|| safe_mean(values))
 }
