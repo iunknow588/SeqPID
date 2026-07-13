@@ -110,6 +110,17 @@ class BasePIDDecomposer:
             q_diag.append(q_diag[-1] if q_diag else 0.01)
         return q_diag
 
+    def _lagged_delta(self, t: int, delta_p: np.ndarray) -> float:
+        return float(delta_p[t - 1]) if t > 0 else 0.0
+
+    def _driver_signal(self, t: int, delta_p: np.ndarray) -> float:
+        """Current default keeps the D-term tied to the second difference.
+
+        Future lower-order variants can override this method without changing
+        the surrounding decomposition loop.
+        """
+        return float(delta_p[t - 1] - delta_p[t - 2]) if t > 1 else 0.0
+
     def decompose_sample(self, sample: DailySample) -> DecompositionResult:
         features = self._extract_from_daily_sample(sample)
         return self._decompose_arrays(
@@ -165,9 +176,9 @@ class BasePIDDecomposer:
         w_retail_series = np.zeros(t_len)
 
         for t in range(t_len):
-            delta_prev = delta_p[t - 1] if t > 0 else 0.0
+            delta_prev = self._lagged_delta(t, delta_p)
             eps_prev = eps_smooth[t - 1] if t > 0 else 0.0
-            d_driver = (delta_p[t - 1] - delta_p[t - 2]) if t > 1 else 0.0
+            d_driver = self._driver_signal(t, delta_p)
             u_ch_prev = u_ch_norm[t - 1] if t > 0 else 0.0
             u_mix_prev = u_mix_norm[t - 1] if t > 0 else 0.0
             u_q_prev = u_q_norm[t - 1] if t > 0 else 0.0

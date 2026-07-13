@@ -1,8 +1,8 @@
 use crate::schemas::{DailySample, DecompositionResult, MarketPidSnapshot, PatternResult, PredictResult};
 use std::collections::HashMap;
 
-const REGIME_STRONG_UP: &str = "强趋势上涨";
-const REGIME_WEAK_UP: &str = "弱趋势上涨";
+const REGIME_STRONG_UP: &str = "强趋势上行";
+const REGIME_WEAK_UP: &str = "弱趋势上行";
 const REGIME_RISK_OFF: &str = "风险偏好退潮";
 const REGIME_WEAK_DOWN: &str = "弱趋势下跌";
 const REGIME_SIDEWAYS: &str = "震荡中性";

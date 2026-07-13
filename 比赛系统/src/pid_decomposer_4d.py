@@ -23,10 +23,10 @@ class PIDDecomposer4D(BasePIDDecomposer):
         u_q: np.ndarray,
         u_retail: np.ndarray,
     ) -> np.ndarray:
-        d_driver = (delta_p[t - 1] - delta_p[t - 2]) if t > 1 else 0.0
+        d_driver = self._driver_signal(t, delta_p)
         return np.array(
             [
-                delta_p[t - 1] if t > 0 else 0.0,
+                self._lagged_delta(t, delta_p),
                 u_ch[t - 1] if t > 0 else 0.0,
                 u_mix[t - 1] if t > 0 else 0.0,
                 d_driver,

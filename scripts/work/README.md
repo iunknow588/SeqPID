@@ -71,3 +71,11 @@ E:\2026OPC大赛\自动化交易\scripts\work\run_level2_analysis.ps1 `
   -TradeDate 20260708 `
   -InputDir C:\level-2-ana\data\20260708\20260708
 ```
+
+## 多天统一批跑
+
+```powershell
+E:\2026OPC大赛\自动化交易\scripts\work\run_multi_day_analysis.ps1
+```
+
+输出会按 `C:\level-2-ana\output\multi_day\<TradeDate>\<Engine>\TradeDate_YYYYMMDD_HHMMSS` 组织。

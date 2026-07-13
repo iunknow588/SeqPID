@@ -1,0 +1,31 @@
+{
+  "sample_count": 100,
+  "pattern_counts": {
+    "日内套利": 42,
+    "大单吸筹": 11,
+    "分时脉冲": 6,
+    "尾盘突袭": 7,
+    "对倒拉升": 29,
+    "连续小单推升": 1,
+    "盘中诱多": 4
+  },
+  "capital_counts": {
+    "量化": 71,
+    "游资": 29
+  },
+  "intention_counts": {
+    "买入": 48,
+    "卖出": 52
+  },
+  "market_snapshot": {
+    "trade_date": "20260709",
+    "market_regime": "弱趋势上行",
+    "up_count": 61,
+    "down_count": 39,
+    "breadth_ratio": 1.564102564102564,
+    "breadth_balance": 0.22,
+    "p_median": 0.00045365774852326447,
+    "i_median": 2.8851772192045473e-05,
+    "d_median": 0.0005512558769030827
+  }
+}

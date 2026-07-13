@@ -1,0 +1,6 @@
+﻿quantity,stable_stock_count_le_10pct_after_env,stable_ratio_after_env,improved_stock_count,improved_ratio,median_orig_range_ratio,median_adj_range_ratio
+force_mix,0,0.0,2,1.0,1.6538662009241925,1.1286549320020776
+abs_beta_ch,0,0.0,2,1.0,1.8664211759359213,1.619208433373532
+abs_theta,0,0.0,1,0.5,2.1130240557023465,2.55216592110311
+abs_phi,0,0.0,0,0.0,1.311383092112685,2.7945688189092524
+abs_beta_q,0,0.0,1,0.5,2.0146948162160006,2.955468111633324

@@ -4,6 +4,7 @@ import csv
 from bisect import bisect_right
 from pathlib import Path
 from time import perf_counter
+from typing import Callable
 
 from capital_model import predict_capitals
 from batch_alerts import build_batch_warnings, collect_missing_symbols
@@ -32,9 +33,23 @@ from pid_decomposer import PIDDecomposer
 from sample_imputation import build_imputed_results
 from schemas import DailySample, MarketPidSnapshot, PatternResult, PredictResult
 
+ProgressFn = Callable[[str], None]
+
 
 def _round_seconds(value: float) -> float:
     return round(value, 6)
+
+
+def _emit_progress(progress_callback: ProgressFn | None, percent: float, message: str) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(f"Progress {percent:5.1f}% | {message}")
+
+
+def _stage_percent(start: float, end: float, current: int, total: int) -> float:
+    if total <= 0:
+        return end
+    return start + (end - start) * min(max(current, 0), total) / total
 
 
 def _open_csv_reader(path: Path) -> csv.DictReader:
@@ -702,6 +717,15 @@ def _build_daily_sample_from_stock_dir(stock_dir: Path, trade_date: str, config:
     raw_active_inferred_count = sum(int(row["active_inferred_count"]) for row in pid_rows)
     raw_side_fallback_count = sum(int(row["side_fallback_count"]) for row in pid_rows)
     raw_unknown_side_amount = sum(float(row["unknown_side_amount"]) for row in pid_rows)
+    raw_order_age_recovered_count = sum(int(row["order_age_recovered_count"]) for row in pid_rows)
+    raw_order_age_missing_count = sum(int(row["order_age_missing_count"]) for row in pid_rows)
+    raw_order_age_direct_count = sum(int(row["order_age_direct_count"]) for row in pid_rows)
+    raw_order_age_fifo_count = sum(int(row["order_age_fifo_count"]) for row in pid_rows)
+    raw_order_age_unresolved_count = sum(int(row["order_age_unresolved_count"]) for row in pid_rows)
+    raw_order_age_total_count = raw_order_age_recovered_count + raw_order_age_missing_count
+    raw_order_age_recovery_ratio = (
+        raw_order_age_recovered_count / raw_order_age_total_count if raw_order_age_total_count > 0 else 0.0
+    )
 
     summary = {
         "deal_amount": total_trade_amount,
@@ -713,6 +737,12 @@ def _build_daily_sample_from_stock_dir(stock_dir: Path, trade_date: str, config:
         "raw_active_inferred_count": raw_active_inferred_count,
         "raw_side_fallback_count": raw_side_fallback_count,
         "raw_unknown_side_amount": raw_unknown_side_amount,
+        "raw_order_age_recovered_count": raw_order_age_recovered_count,
+        "raw_order_age_missing_count": raw_order_age_missing_count,
+        "raw_order_age_direct_count": raw_order_age_direct_count,
+        "raw_order_age_fifo_count": raw_order_age_fifo_count,
+        "raw_order_age_unresolved_count": raw_order_age_unresolved_count,
+        "raw_order_age_recovery_ratio": raw_order_age_recovery_ratio,
         "net_direction": net_direction,
         "close_return": close_return,
         "open_return": open_return,
@@ -805,11 +835,13 @@ def run_daily_batch(
     enable_submit_zip: bool = True,
     profile_enabled: bool = False,
     submit_date_override: str | None = None,
+    progress_callback: ProgressFn | None = None,
 ) -> dict:
     batch_started_at = perf_counter()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     input_dir = Path(input_dir)
+    _emit_progress(progress_callback, 0.0, "starting batch analysis")
     requested_symbols, stock_universe = data_loader.load_stock_universe(stock_list_file)
     sample_build_seconds = 0.0
     pattern_seconds = 0.0
@@ -825,11 +857,15 @@ def run_daily_batch(
             stock_offset=stock_offset,
             stock_limit=stock_limit,
         )
+        total_stock_dirs = len(stock_dirs)
+        _emit_progress(progress_callback, 1.0, f"building samples 0/{total_stock_dirs}")
         samples: list[DailySample] = []
-        for stock_dir in stock_dirs:
+        for index, stock_dir in enumerate(stock_dirs, start=1):
             missing_files = data_loader.get_missing_required_files(stock_dir)
             if missing_files:
                 incomplete_stock_dirs[stock_dir.name] = missing_files
+                percent = _stage_percent(0.0, 45.0, index, total_stock_dirs)
+                _emit_progress(progress_callback, percent, f"skipped incomplete sample {index}/{total_stock_dirs} {stock_dir.name}")
                 continue
             started_at = perf_counter()
             sample = _build_daily_sample_from_stock_dir(stock_dir, trade_date, config=config)
@@ -844,38 +880,49 @@ def run_daily_batch(
                             "sample_build_seconds": _round_seconds(elapsed),
                         }
                     )
+            percent = _stage_percent(0.0, 45.0, index, total_stock_dirs)
+            _emit_progress(progress_callback, percent, f"built sample {index}/{total_stock_dirs} {stock_dir.name}")
     else:
+        _emit_progress(progress_callback, 1.0, "loading samples from flat input")
         started_at = perf_counter()
         samples = _load_daily_samples(input_dir, trade_date, config=config, stock_limit=stock_limit, stock_universe=stock_universe)
         sample_build_seconds += perf_counter() - started_at
+        _emit_progress(progress_callback, 45.0, f"loaded samples {len(samples)}")
     started_at = perf_counter()
     pid_decomposer = PIDDecomposer(config)
-    pid_results_by_symbol = {
-        sample.stock_code: pid_decomposer.decompose_sample(sample)
-        for sample in samples
-    }
+    pid_results_by_symbol = {}
+    total_samples = len(samples)
+    for index, sample in enumerate(samples, start=1):
+        pid_results_by_symbol[sample.stock_code] = pid_decomposer.decompose_sample(sample)
+        percent = _stage_percent(45.0, 65.0, index, total_samples)
+        _emit_progress(progress_callback, percent, f"PID {index}/{total_samples} {sample.stock_code}")
     pid_seconds = perf_counter() - started_at
 
     started_at = perf_counter()
-    pattern_results: list[PatternResult] = [
-        predict_pattern(sample, config, label_dict, pid_results_by_symbol.get(sample.stock_code))
-        for sample in samples
-    ]
+    pattern_results: list[PatternResult] = []
+    for index, sample in enumerate(samples, start=1):
+        pattern_results.append(predict_pattern(sample, config, label_dict, pid_results_by_symbol.get(sample.stock_code)))
+        percent = _stage_percent(65.0, 75.0, index, total_samples)
+        _emit_progress(progress_callback, percent, f"pattern {index}/{total_samples} {sample.stock_code}")
     pattern_seconds = perf_counter() - started_at
 
     started_at = perf_counter()
     predict_results: list[PredictResult] = []
-    for sample in samples:
+    for index, sample in enumerate(samples, start=1):
         pid_result = pid_results_by_symbol[sample.stock_code]
         predict_results.extend(predict_capitals(sample, config, label_dict, pid_result))
+        percent = _stage_percent(75.0, 88.0, index, total_samples)
+        _emit_progress(progress_callback, percent, f"capital {index}/{total_samples} {sample.stock_code}")
     capital_seconds = perf_counter() - started_at + pid_seconds
     market_snapshot: MarketPidSnapshot | None = None
 
     if samples and config.get("enable_market_snapshot", True):
+        _emit_progress(progress_callback, 89.0, "estimating market snapshot")
         started_at = perf_counter()
         market_snapshot = estimate_market_pid(samples, pid_results_by_symbol, pattern_results, predict_results, config)
         attach_market_relative_metrics(samples, predict_results, market_snapshot)
         market_seconds = perf_counter() - started_at
+    _emit_progress(progress_callback, 92.0, "building warnings and imputed outputs")
 
     missing_symbols = collect_missing_symbols(requested_symbols, samples)
     warnings = build_batch_warnings(samples, missing_symbols, incomplete_stock_dirs)
@@ -899,6 +946,7 @@ def run_daily_batch(
         predict_results.extend(imputed_predict_results)
         warnings = build_batch_warnings(samples, missing_symbols, incomplete_stock_dirs, imputed_symbols=missing_symbols)
 
+    _emit_progress(progress_callback, 94.0, "exporting result files")
     pattern_results = data_loader.sort_by_requested_order(pattern_results, requested_symbols, "stock_code")
     predict_results = data_loader.sort_by_requested_order(predict_results, requested_symbols, "stock_code")
 
@@ -945,6 +993,7 @@ def run_daily_batch(
 
     submit_zip = None
     if enable_submit_zip:
+        _emit_progress(progress_callback, 98.0, "building submit.zip")
         started_at = perf_counter()
         submit_zip = build_submit_zip(output_dir)
         export_seconds += perf_counter() - started_at
@@ -964,7 +1013,7 @@ def run_daily_batch(
         round_seconds=_round_seconds,
     )
 
-    return build_batch_result(
+    result = build_batch_result(
         trade_date=trade_date,
         sample_count=len(samples),
         pattern_results=pattern_results,
@@ -987,3 +1036,5 @@ def run_daily_batch(
         incomplete_stock_dirs=incomplete_stock_dirs,
         performance_summary=performance_summary,
     )
+    _emit_progress(progress_callback, 100.0, "batch analysis finished")
+    return result

@@ -1,0 +1,23 @@
+{
+  "capital_counts": {
+    "量化": 1
+  },
+  "intention_counts": {
+    "买入": 1
+  },
+  "market_snapshot": {
+    "breadth_balance": -1.0,
+    "breadth_ratio": 0.0,
+    "d_median": 0.00014069070948806735,
+    "down_count": 1,
+    "i_median": 0.00001196494694494371,
+    "market_regime": "弱趋势下跌",
+    "p_median": 0.0007365828728610024,
+    "trade_date": "20260709",
+    "up_count": 0
+  },
+  "pattern_counts": {
+    "对倒拉升": 1
+  },
+  "sample_count": 1
+}

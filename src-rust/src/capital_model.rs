@@ -43,10 +43,11 @@ fn rule_flow_evidence(sample: &DailySample) -> RuleFlowEvidence {
         return RuleFlowEvidence::default();
     }
 
-    let (dominant_key, dominant_abs) = abs_totals
+    let dominant_order = ["hot_money", "quant", "retail"];
+    let (dominant_key, dominant_abs) = dominant_order
         .iter()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-        .map(|(k, v)| (*k, *v))
+        .map(|key| (*key, *abs_totals.get(key).unwrap_or(&0.0)))
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
         .unwrap_or(("retail", 0.0));
     let recovery_total = recovered + missing;
     let recovery_ratio = if recovery_total > 0.0 { recovered / recovery_total } else { 0.0 };
@@ -75,7 +76,7 @@ fn select_capital_type(
     sample: &DailySample,
     pid_result: &DecompositionResult,
     config: &HashMap<String, serde_yaml::Value>,
-) -> (String, f64, HashMap<String, serde_json::Value>) {
+) -> (String, f64, RuleFlowEvidence, HashMap<String, serde_json::Value>) {
     let structural_label = pid_result.dominant_type.clone();
     let structural_ratio = match structural_label.as_str() {
         "游资" => pid_result.hot_money_ratio,
@@ -172,7 +173,7 @@ fn select_capital_type(
         "rule_flow_signed_amount".into(),
         serde_json::json!(round4(rule.signed_amount)),
     );
-    (selected_label, selected_confidence, debug)
+    (selected_label, selected_confidence, rule, debug)
 }
 
 fn map_pid_to_intention(
@@ -259,7 +260,7 @@ pub fn predict_capitals(
     pid_result: &DecompositionResult,
 ) -> Vec<PredictResult> {
     let summary = &sample.feature_summary;
-    let (dominant_type, selected_ratio, mut capital_debug) = select_capital_type(sample, pid_result, config);
+    let (dominant_type, selected_ratio, rule_flow, mut capital_debug) = select_capital_type(sample, pid_result, config);
     let (mut intention, mut intention_confidence) =
         map_pid_to_intention(pid_result, summary, config, label_dict);
 
@@ -268,14 +269,8 @@ pub fn predict_capitals(
         .and_then(|v| v.as_str())
         == Some("rule_flow_override")
     {
-        let signed_amount = capital_debug
-            .get("rule_flow_signed_amount")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let rule_flow_confidence = capital_debug
-            .get("rule_flow_confidence")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
+        let signed_amount = rule_flow.signed_amount;
+        let rule_flow_confidence = rule_flow.confidence;
         if signed_amount.abs() > 0.0 {
             intention = if signed_amount > 0.0 { "买入" } else { "卖出" }.to_string();
             intention_confidence =
@@ -462,7 +457,7 @@ pub fn predict_capital(
         .unwrap_or_default()
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct RuleFlowEvidence {
     label: String,
     signed_amount: f64,

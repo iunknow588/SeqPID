@@ -121,7 +121,7 @@ def _build_timestamped_output_dir(base_dir: Path, trade_date: str) -> Path:
 
 
 def _default_logger(message: str) -> None:
-    print(message)
+    print(message, flush=True)
 
 
 def _write_performance_report(output_dir: str | Path, performance_summary: dict) -> Path:
@@ -199,6 +199,7 @@ def run_batch_job(
         enable_submit_zip=config.get("enable_submit_zip", False) or build_zip,
         profile_enabled=profile_enabled,
         submit_date_override=submit_date or None,
+        progress_callback=log,
     )
     log(f"Batch finished for {trade_date}")
     log(f"Input directory: {resolved_input_dir}")

@@ -547,9 +547,11 @@ pub fn export_pid_window_contrib(
         .max()
         .unwrap_or(0);
         for window_id in 0..row_count {
-            let c_p = series_value(&result.c_p, window_id);
-            let capital_ch = series_value(&result.capital_ch, window_id);
-            let capital_mix = c_p - capital_ch;
+            let c_p_raw = series_value_default(&result.c_p, window_id, 0.0);
+            let capital_ch_raw = series_value_default(&result.capital_ch, window_id, 0.0);
+            let c_p = round6(c_p_raw);
+            let capital_ch = round6(capital_ch_raw);
+            let capital_mix = round6(c_p_raw - capital_ch_raw);
             wtr.write_record(&[
                 result.stock_code.as_str(),
                 result.transaction_date.as_str(),
@@ -562,7 +564,7 @@ pub fn export_pid_window_contrib(
                 &series_value(&result.capital_q, window_id).to_string(),
                 &series_value(&result.capital_retail, window_id).to_string(),
                 &capital_mix.to_string(),
-                &series_value_default(&result.noise_ratio, window_id, 1.0).to_string(),
+                &round6(series_value_default(&result.noise_ratio, window_id, 1.0)).to_string(),
                 &series_value(&result.explain_ratio, window_id).to_string(),
                 &series_value(&result.capital_anchor_error, window_id).to_string(),
                 &format!("{:.2e}", result.pid_closure_error),

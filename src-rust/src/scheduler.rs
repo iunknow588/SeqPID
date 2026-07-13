@@ -13,6 +13,7 @@ use csv::ReaderBuilder;
 use encoding_rs::GB18030;
 use std::collections::HashMap;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -79,6 +80,18 @@ fn miss(d: &Path) -> Vec<String> {
     m
 }
 fn rsec(v:f64)->f64{(v*1e6).round()/1e6}
+
+fn progress(percent: f64, message: &str) {
+    println!("Progress {:5.1}% | {}", percent, message);
+    let _ = io::stdout().flush();
+}
+
+fn stage_percent(start: f64, end: f64, current: usize, total: usize) -> f64 {
+    if total == 0 {
+        return end;
+    }
+    start + (end - start) * current.min(total) as f64 / total as f64
+}
 fn dec(b:&[u8])->String{ match std::str::from_utf8(b){Ok(t)=>t.to_string(),Err(_)=>GB18030.decode(b).0.to_string()} }
 
 fn scaled_price(val: f64) -> f64 {
@@ -320,6 +333,11 @@ fn build_raw(sd: &Path, config: &ConfigMap) -> Result<RawBuildOutput> {
             bid_vols: bv, ask_vols: av,
         });
     }
+    let active_qrows: Vec<QRow> = qrows
+        .iter()
+        .filter(|quote| quote.bid_px_1 > 0.0 || quote.ask_px_1 > 0.0)
+        .cloned()
+        .collect();
 
     let last_q = qrows.last();
     let prev_close = last_q.map(|q| q.prev_close).unwrap_or(0.0);
@@ -424,6 +442,7 @@ fn build_raw(sd: &Path, config: &ConfigMap) -> Result<RawBuildOutput> {
     let mut tr = ReaderBuilder::new().has_headers(true).from_reader(tt.as_bytes());
     let th: Vec<String> = tr.headers()?.iter().map(|x| x.to_string()).collect();
     let species_large_threshold = get_nested_f64(config, "species_rules", "large_order_amount_threshold", 500_000.0);
+    let passive_survival_minutes = get_nested_f64(config, "species_rules", "passive_survival_minutes", 5.0);
     let active_fallback_to_side = get_nested_bool(config, "species_rules", "active_fallback_to_side", true);
     let active_fallback_hot_amount = get_nested_f64(config, "species_rules", "active_fallback_hot_amount", 100_000.0);
     let mut trade_rows: Vec<HashMap<String, String>> = Vec::new();
@@ -523,7 +542,7 @@ fn build_raw(sd: &Path, config: &ConfigMap) -> Result<RawBuildOutput> {
         let window_id = time_to_window_id(time);
         if let Some(window_id) = window_id {
             let side_sign = trade_side_sign_from_row(row);
-            let quote = lookup_quote_at_or_before(time as i32, &qrows);
+            let quote = lookup_quote_at_or_before(time as i32, &active_qrows);
             let active_sign = if quote.is_some() {
                 active_side_sign(price, quote, side_sign)
             } else if active_fallback_to_side {
@@ -609,7 +628,7 @@ fn build_raw(sd: &Path, config: &ConfigMap) -> Result<RawBuildOutput> {
                     add_bucket_f64(bucket, "large_active_sell_amount", amount);
                 }
             } else {
-                if !is_active && order_age.order_age_minutes.unwrap_or(0.0) > 5.0 {
+                if !is_active && order_age.order_age_minutes.unwrap_or(0.0) > passive_survival_minutes {
                     add_bucket_f64(bucket, "R_seed_t", rule_signed_amount);
                     add_bucket_f64(bucket, "passive_retail_amount", rule_signed_amount);
                 } else if is_active || active_fallback_to_side {
@@ -619,10 +638,16 @@ fn build_raw(sd: &Path, config: &ConfigMap) -> Result<RawBuildOutput> {
                         add_bucket_f64(bucket, "active_non_large_amount", quant_amount);
                     } else {
                         add_bucket_f64(bucket, "passive_quant_amount", quant_amount);
+                        if order_age.order_age_minutes.is_none() {
+                            add_bucket_f64(bucket, "low_fallback_count", 1.0);
+                        }
                     }
                 } else {
                     add_bucket_f64(bucket, "Q_rule_t", rule_signed_amount);
                     add_bucket_f64(bucket, "passive_quant_amount", rule_signed_amount);
+                    if order_age.order_age_minutes.is_none() {
+                        add_bucket_f64(bucket, "low_fallback_count", 1.0);
+                    }
                 }
                 add_bucket_f64(bucket, "signed_mix_qr_amount", signed_amount);
                 if side_sign > 0 {
@@ -802,10 +827,19 @@ fn load_samples(inp: &Path, td: &str, sl: Option<usize>, so: usize, su: &Option<
                     let mut keys: Vec<String>=sym.keys().cloned().collect(); keys.sort();
                     if let Some(u)=su{keys.retain(|s|u.contains(s));}
                     let keys: Vec<String>=keys.into_iter().skip(so).take(sl.unwrap_or(usize::MAX)).collect();
-                    for k in &keys {
+                    let total=keys.len();
+                    progress(1.0, &format!("building samples 0/{}", total));
+                    for (idx,k) in keys.iter().enumerate() {
                         let st=Instant::now(); let rows=sym.remove(k).unwrap_or_default();
-                        if rows.is_empty(){continue;}
-                        let sm=build_ref(&hdr,&ci,rows.iter().cloned()); if sm.is_empty(){continue;}
+                        if rows.is_empty(){
+                            progress(stage_percent(0.0,45.0,idx+1,total), &format!("skipped empty sample {}/{} {}", idx+1, total, k));
+                            continue;
+                        }
+                        let sm=build_ref(&hdr,&ci,rows.iter().cloned());
+                        if sm.is_empty(){
+                            progress(stage_percent(0.0,45.0,idx+1,total), &format!("skipped empty sample {}/{} {}", idx+1, total, k));
+                            continue;
+                        }
                         let el=st.elapsed().as_secs_f64();
                         let feature_rows: Vec<HashMap<String, String>> = rows
                             .iter()
@@ -818,22 +852,38 @@ fn load_samples(inp: &Path, td: &str, sl: Option<usize>, so: usize, su: &Option<
                             .collect();
                         smp.push(DailySample{stock_code:k.clone(),transaction_date:td.into(),rows:feature_rows,feature_summary:sm,quality_flags:HashMap::new()});
                         let mut t2=HashMap::new(); t2.insert("sample_build_seconds".into(),rsec(el)); stm.push(t2);
+                        progress(stage_percent(0.0,45.0,idx+1,total), &format!("built sample {}/{} {}", idx+1, total, k));
                     }
                 }
             }
         }
         return (smp,inc,stm);
     }
-    let sd=filt(iter_stock_dirs(inp),su);
-    for d in sd.iter().skip(so).take(sl.unwrap_or(usize::MAX)) {
+    let sd: Vec<PathBuf>=filt(iter_stock_dirs(inp),su).into_iter().skip(so).take(sl.unwrap_or(usize::MAX)).collect();
+    let total=sd.len();
+    progress(1.0, &format!("building samples 0/{}", total));
+    for (idx,d) in sd.iter().enumerate() {
         let ms=miss(d);
-        if !ms.is_empty(){inc.insert(d.file_name().unwrap().to_string_lossy().to_string(),ms);continue;}
+        let name=d.file_name().unwrap().to_string_lossy().to_string();
+        if !ms.is_empty(){
+            inc.insert(name.clone(),ms);
+            progress(stage_percent(0.0,45.0,idx+1,total), &format!("skipped incomplete sample {}/{} {}", idx+1, total, name));
+            continue;
+        }
         let st=Instant::now();
-        let sym=d.file_name().unwrap().to_string_lossy().to_uppercase();
-        let raw=match build_raw(d, cfg){Ok(s) if !s.summary.is_empty()=>s, _=>{inc.insert(sym.clone(),vec!["no_data".into()]);continue;}};
+        let sym=name.to_uppercase();
+        let raw=match build_raw(d, cfg){
+            Ok(s) if !s.summary.is_empty()=>s,
+            _=>{
+                inc.insert(sym.clone(),vec!["no_data".into()]);
+                progress(stage_percent(0.0,45.0,idx+1,total), &format!("skipped empty sample {}/{} {}", idx+1, total, sym));
+                continue;
+            }
+        };
         let el=st.elapsed().as_secs_f64();
-        smp.push(DailySample{stock_code:sym,transaction_date:td.into(),rows:raw.rows,feature_summary:raw.summary,quality_flags:HashMap::new()});
+        smp.push(DailySample{stock_code:sym.clone(),transaction_date:td.into(),rows:raw.rows,feature_summary:raw.summary,quality_flags:HashMap::new()});
         let mut t2=HashMap::new(); t2.insert("sample_build_seconds".into(),rsec(el)); stm.push(t2);
+        progress(stage_percent(0.0,45.0,idx+1,total), &format!("built sample {}/{} {}", idx+1, total, sym));
     }
     (smp,inc,stm)
 }
@@ -931,37 +981,48 @@ pub fn run_daily_batch(td: &str, inp: &Path, out: &Path, cfg: &ConfigMap, ld: &C
     -> Result<HashMap<String,serde_json::Value>>
 {
     let t0=Instant::now(); fs::create_dir_all(out)?;
+    progress(0.0, "starting batch analysis");
     let (req,su)=load_universe(slf)?;
     let mut w: Vec<String>=Vec::new(); let mut ms=0.0f64;
     let t1=Instant::now();
     let (mut smp,inc,stm)=load_samples(inp,td,sl,so,&su,cfg);
     let sbs=t1.elapsed().as_secs_f64();
+    progress(45.0, &format!("loaded samples {}", smp.len()));
     if smp.is_empty(){w.push("No samples.".into());}
     let pid_decomposer = PIDDecomposer::new(cfg);
     let t1=Instant::now();
-    let pid_results: HashMap<String, _> = smp
-        .iter()
-        .map(|sample| (sample.stock_code.clone(), pid_decomposer.decompose_sample(sample)))
-        .collect();
+    let total_samples=smp.len();
+    let mut pid_results: HashMap<String, _> = HashMap::new();
+    for (idx, sample) in smp.iter().enumerate() {
+        pid_results.insert(sample.stock_code.clone(), pid_decomposer.decompose_sample(sample));
+        progress(stage_percent(45.0,65.0,idx+1,total_samples), &format!("PID {}/{} {}", idx+1, total_samples, sample.stock_code));
+    }
     let pid_secs=t1.elapsed().as_secs_f64();
     let t1=Instant::now();
-    let mut pr: Vec<PatternResult>=smp.iter().map(|s|predict_pattern(s,cfg,ld,pid_results.get(&s.stock_code))).collect();
+    let mut pr: Vec<PatternResult>=Vec::new();
+    for (idx, sample) in smp.iter().enumerate() {
+        pr.push(predict_pattern(sample,cfg,ld,pid_results.get(&sample.stock_code)));
+        progress(stage_percent(65.0,75.0,idx+1,total_samples), &format!("pattern {}/{} {}", idx+1, total_samples, sample.stock_code));
+    }
     let ps=t1.elapsed().as_secs_f64();
     let t1=Instant::now();
     let mut pd: Vec<PredictResult>=Vec::new();
-    for sample in &smp {
+    for (idx, sample) in smp.iter().enumerate() {
         if let Some(pid_result) = pid_results.get(&sample.stock_code) {
             pd.extend(predict_capitals(sample,cfg,ld,pid_result));
         }
+        progress(stage_percent(75.0,88.0,idx+1,total_samples), &format!("capital {}/{} {}", idx+1, total_samples, sample.stock_code));
     }
     let cps=pid_secs + t1.elapsed().as_secs_f64();
     let mut msn: Option<MarketPidSnapshot>=None;
     if !smp.is_empty()&&get_bool(cfg,"enable_market_snapshot",true) {
+        progress(89.0, "estimating market snapshot");
         let t1=Instant::now();
         msn=Some(estimate_market_pid(&mut smp,&pid_results,&pr,&pd,cfg));
         if let Some(ref sn)=msn{attach_market_relative_metrics(&smp,&mut pd,sn);}
         ms=t1.elapsed().as_secs_f64();
     }
+    progress(92.0, "building warnings and imputed outputs");
     let mut missing_symbols: Vec<String> = Vec::new();
     if let Some(ref rq)=req {
         let act: std::collections::HashSet<String>=smp.iter().map(|s|s.stock_code.to_uppercase()).collect();
@@ -978,6 +1039,7 @@ pub fn run_daily_batch(td: &str, inp: &Path, out: &Path, cfg: &ConfigMap, ld: &C
         pr.append(&mut imputed_patterns);
         pd.append(&mut imputed_predicts);
     }
+    progress(94.0, "exporting result files");
     sort_ord(&mut pr,&req,|r|r.stock_code.clone());
     sort_ord(&mut pd,&req,|r|r.stock_code.clone());
     let t1=Instant::now();
@@ -1001,6 +1063,7 @@ pub fn run_daily_batch(td: &str, inp: &Path, out: &Path, cfg: &ConfigMap, ld: &C
     let mut es=t1.elapsed().as_secs_f64();
     let mut sz: Option<String>=None;
     if zip {
+        progress(98.0, "building submit.zip");
         let t1=Instant::now();
         match exporter::build_submit_zip(out){Ok(p)=>sz=Some(p),Err(e)=>w.push(format!("zip: {}",e))}
         es+=t1.elapsed().as_secs_f64();
@@ -1040,5 +1103,6 @@ pub fn run_daily_batch(td: &str, inp: &Path, out: &Path, cfg: &ConfigMap, ld: &C
     r.insert("diagnostics_json_path".into(),serde_json::Value::String(dj));
     r.insert("distribution_csv_path".into(),serde_json::Value::String(dc));
     if let Some(p)=psm{r.insert("performance_summary".into(),p);}
+    progress(100.0, "batch analysis finished");
     Ok(r)
 }
