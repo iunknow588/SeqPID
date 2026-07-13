@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import csv
+import sys
 from bisect import bisect_right
 from pathlib import Path
 from time import perf_counter
@@ -37,6 +38,8 @@ from schemas import DailySample, MarketPidSnapshot, PatternResult, PredictResult
 
 ProgressFn = Callable[[str], None]
 
+csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
+
 
 def _round_seconds(value: float) -> float:
     return round(value, 6)
@@ -60,7 +63,7 @@ def _open_csv_reader(path: Path) -> csv.DictReader:
         try:
             fh = path.open("r", encoding=encoding, newline="")
             return csv.DictReader(fh)
-        except UnicodeDecodeError as exc:
+        except UnicodeError as exc:
             last_error = exc
             continue
     if last_error is not None:
@@ -526,18 +529,23 @@ def _load_rows_from_csv(path: Path, trade_date: str) -> list[dict]:
 
 def _read_csv_rows(path: Path, trade_date: str) -> list[dict]:
     last_error: Exception | None = None
-    for encoding in ("utf-8-sig", "gb18030"):
+    for encoding in ("utf-8-sig", "gb18030", "utf-16", "utf-16-le", "utf-16-be"):
         try:
             with path.open("r", encoding=encoding, newline="") as fh:
                 reader = csv.DictReader(fh)
+                if reader.fieldnames and any("\x00" in name for name in reader.fieldnames if name):
+                    continue
                 rows: list[dict] = []
                 for row in reader:
+                    if any("\x00" in str(key) for key in row.keys() if key is not None):
+                        rows = []
+                        break
                     row_date = str(row.get("date") or row.get("trade_date") or "")
                     if row_date and row_date != trade_date:
                         continue
                     rows.append(row)
                 return rows
-        except UnicodeDecodeError as exc:
+        except UnicodeError as exc:
             last_error = exc
             continue
     if last_error is not None:
