@@ -9,7 +9,6 @@
 - `比赛详细设计说明书.md` V1.7
 - `PID算法与实现.md`
 - `统一资金类型判断规范.md` V1.1
-- `PID算法与实现.md`
 - `金融领域的物理学概念模型.md`
 - `比赛系统/` 当前代码实现
 
@@ -30,6 +29,10 @@
 7. 理论口径现已定版：成交量窗口可视为离散交易时间 `q`，价格为 `P_state(q)`；`P_wv_window` 仅作成交量域诊断，实时状态和提交使用 `P_state`。
 8. 观测差分 `y_t / v_q,t` 与预测值 `y_hat_t+1|t / v_hat_q,t+1|t` 必须分字段保存。
 9. 实时路径只允许使用先验/滤波量；RTS、HP 和全样本平滑只用于离线复盘。
+10. PID 实现按参数状态空间三式验收：`psi_t` 转移、`y_t` 观测、`y_hat_t+1|t` 预测，禁止把价格差分重构关系做成第二套状态估计。
+11. 4D/5D 模式切换必须固定 `5/3/2` 滞回、`lambda_switch / lambda_jump / lambda_error` 和参数跳变阈值，提交期不得动态调参。
+12. `beta_norm / m_eff / m_slow` 进入画像前必须通过同口径、市值占比流、截断、不确定性、实时方法白名单和流动性分组可比性检查。
+13. 双域映射和 `kappa_t` 只作诊断；零成交、薄成交或 `domain_mapping_valid_flag = false` 时不得进入排名或正式标签判断。
 
 ---
 
@@ -43,6 +46,8 @@
 - `beta_norm / m_eff` 必须说明同一 `U_*_mv_ratio` 输入口径、截断标记和不确定性边界。
 - 详细设计、概要设计和清单中的模式名、零成交策略、泄漏字段与回退规则必须一致。
 - 所有正式提交路径必须显式记录 `data_leakage_check` 和 `m_eff_uncertainty_flag`。
+- 概要、详细和建设清单必须同步写明标准状态空间三式、模式切换 `lambda` 范围、流动性分组可比性和薄成交窗口降级。
+- `m_slow_method` 的默认优先级必须解释为工程稳健性排序，不能写成理论最优性结论。
 
 | 检查项 | 目标状态 | 当前状态 | 下一步 |
 |---|---|---|---|
@@ -133,6 +138,10 @@
 | 实时/离线方法边界 | PID selector/shared | 实时路径禁止 RTS/HP/全样本平滑，离线方法必须显式标记 | `待复核` |
 | 等效质量安全边界 | PID shared / StateFeature | 同口径 `beta_norm`；截断或置信区间过宽时 `m_eff_rank_eligible = false` | `待复核` |
 | 观测/预测字段分离 | `src/schemas.py` / exporter | `y_observed / y_hat_next / v_q_observed / v_hat_q_next` 不覆盖 | `待复核` |
+| 状态空间三式验收 | PID selector/shared/4D/5D 链路 | `psi_t` 转移、`y_t` 观测、`y_hat_t+1|t` 预测分层，价格重构关系不作为独立状态方程 | `待复核` |
+| 模式切换超参冻结 | PID shared / 配置文件 | `lambda_switch / lambda_jump / lambda_error` 和 `K_up / K_down` 训练前固定，输出敏感性报告 | `待复核` |
+| 流动性可比性与薄成交窗口 | PID shared / market_pid / exporter | 输出 `liquidity_group / cross_symbol_comparable / thin_trade_window / domain_mapping_valid_flag` | `待执行` |
+| `m_slow` 方法优先级 | PID shared / 配置文件 | 默认 `ewma_realtime`，卡尔曼滤波需离线验证优于基线后启用 | `待复核` |
 
 ---
 
@@ -206,6 +215,9 @@
 6. `test_pid_stability_fallback.py`：验证 Jury/特征根失败、m_eff 截断和高不确定性回退。
 7. `test_data_leakage_runtime_guard.py`：验证未来数据注入、标准化截止时间和离线平滑方法阻断。
 8. `test_zero_trade_policy.py`：验证 `skip / carry_forward / mark_only` 固定策略不读取未来窗口。
+9. `test_pid_state_space_contract.py`：验证 `psi_t|t-1 / psi_t|t / y_t / y_hat_t+1|t` 时间戳和字段边界。
+10. `test_mode_switch_lambda_config.py`：验证模式切换 lambda、滞回窗口和日内切换上限训练前固定。
+11. `test_liquidity_comparability.py`：验证流动性分组、跨股可比标记和薄成交窗口降级。
 
 ---
 
@@ -286,6 +298,7 @@
 |---|---|---|
 | V1.6 | 2026-07-11 | 补充统一 PID/规则口径、默认 `baseline_4d` 运行态与市场 PID 主聚合约束 |
 | V1.7 | 2026-07-13 | 对齐 PID/金融物理模型最新口径，补充观测预测分离、稳定性回退、等效质量不确定性、防泄漏审计与诊断交付物 |
+| V1.8 | 2026-07-13 | 同步状态空间三式、模式切换 lambda、流动性可比性、薄成交窗口和 `m_slow` 工程优先级检查 |
 
 ---
 

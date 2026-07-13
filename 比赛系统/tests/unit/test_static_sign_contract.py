@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
@@ -12,7 +12,7 @@ CHECKS = [
     {
         "name": "trade side sign maps sell to negative",
         "path": SRC_DIR / "scheduler.py",
-        "needles": ['if raw in {"S", "SELL", "卖", "主动卖", "2"}:', "return -1"],
+        "needles": [],
     },
     {
         "name": "trade signed amount uses side sign",
@@ -22,7 +22,11 @@ CHECKS = [
     {
         "name": "active large signed amount uses active sign",
         "path": SRC_DIR / "scheduler.py",
-        "needles": ["rule_signed_amount = active_sign * amount if is_large_active else signed_amount"],
+        "needles": [
+            "active_rule_signed_amount = active_sign * amount if is_active else signed_amount",
+            'bucket["signed_large_active_amount"] += active_rule_signed_amount',
+            'bucket["CH_rule_t"] += active_rule_signed_amount',
+        ],
     },
     {
         "name": "rule event stores signed amount",
@@ -49,7 +53,7 @@ CHECKS = [
     },
     {
         "name": "pid reads official signed rule fields",
-        "path": SRC_DIR / "pid_decomposer.py",
+        "path": SRC_DIR / "pid_decomposer_shared.py",
         "needles": [
             '"CH_rule_t"',
             '"Q_rule_t"',
@@ -62,7 +66,7 @@ CHECKS = [
         "path": SRC_DIR / "capital_model.py",
         "needles": [
             '"rule_flow_signed_amount"',
-            'intention = "买入" if float(capital_source_debug["rule_flow_signed_amount"]) > 0 else "卖出"',
+            'intention = "涔板叆" if float(capital_source_debug["rule_flow_signed_amount"]) > 0 else "鍗栧嚭"',
         ],
     },
 ]
@@ -83,7 +87,15 @@ def run_sign_contract_checks() -> tuple[list[dict], list[str]]:
     failures: list[str] = []
     for check in CHECKS:
         text = check["path"].read_text(encoding="utf-8")
-        missing = [needle for needle in check["needles"] if needle not in text]
+        needles = check["needles"]
+        if check["name"] == "trade side sign maps sell to negative":
+            needles = ['if raw in {"S", "SELL", "\u5356", "\u4e3b\u52a8\u5356", "2"}:', "return -1"]
+        elif check["name"] == "capital model rule flow intention uses signed direction":
+            needles = [
+                '"rule_flow_signed_amount"',
+                'intention = "\u4e70\u5165" if float(capital_source_debug["rule_flow_signed_amount"]) > 0 else "\u5356\u51fa"',
+            ]
+        missing = [needle for needle in needles if needle not in text]
         results.append(
             {
                 "name": check["name"],

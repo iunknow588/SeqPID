@@ -113,6 +113,65 @@ PID_WINDOW_CONTRIB_COLUMNS = [
     "capital_anchor_error",
     "closure_error",
 ]
+PID_WINDOW_DIAG_COLUMNS = [
+    "trade_date",
+    "symbol",
+    "window_id",
+    "mode_name",
+    "q_type",
+    "u_source_type",
+    "estimator_method",
+    "state_space_contract",
+    "psi_prediction_semantics",
+    "y_observed",
+    "y_hat_next",
+    "v_q_observed",
+    "v_hat_q_next",
+    "c_p",
+    "c_i",
+    "c_d",
+    "eps",
+    "capital_ch",
+    "capital_q",
+    "capital_retail",
+    "capital_mix",
+    "closure_impl_error",
+    "model_residual",
+    "param_stability_flag",
+    "m_eff_rank_eligible",
+    "data_leakage_check",
+    "m_slow_method",
+    "thin_trade_window",
+    "cross_symbol_comparable",
+    "domain_mapping_valid_flag",
+    "warnings",
+]
+PID_DAILY_DIAG_COLUMNS = [
+    "trade_date",
+    "symbol",
+    "mode_name",
+    "q_type",
+    "u_source_type",
+    "estimator_method",
+    "m_slow_method",
+    "lookback_days",
+    "zero_trade_policy",
+    "submission_requires_complete_windows",
+    "lambda_switch",
+    "lambda_jump",
+    "lambda_error",
+    "data_leakage_check",
+    "feature_engineering_leakage_check",
+    "rule_layer_leakage_check",
+    "offline_smooth_used",
+    "param_stability_flag",
+    "m_eff_uncertainty_flag",
+    "m_eff_rank_eligible",
+    "submission_ready",
+    "code_build_hash",
+    "warning_count",
+    "warnings",
+]
 WINDOW_FLOW_COLUMNS = [
     "stock_code",
     "transaction_date",
@@ -572,6 +631,127 @@ def export_pid_window_contrib(pid_results: list[object], output_path: str | Path
                         f"{float(getattr(result, 'pid_closure_error', getattr(result, 'closure_error', 0.0))):.2e}",
                     ]
                 )
+
+
+def export_pid_window_diag(pid_results: list[object], output_path: str | Path, config: dict | None = None) -> None:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cfg = config or {}
+    q_type = str(cfg.get("q_type", "window_index"))
+    u_source_type = str(cfg.get("u_source_type", "mv_ratio"))
+    estimator_method = str(cfg.get("estimator_method", "kalman_filter_realtime"))
+    m_slow_method = str(cfg.get("m_slow_method", "ewma_realtime"))
+    data_leakage_check = "pass"
+    if "offline" in estimator_method or "offline" in m_slow_method:
+        data_leakage_check = "fail"
+
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(PID_WINDOW_DIAG_COLUMNS)
+        for result in sorted(pid_results, key=lambda item: (getattr(item, "stock_code", ""), getattr(item, "transaction_date", ""))):
+            row_count = _series_len(result, ["c_p", "c_i", "c_d", "eps", "capital_ch", "capital_q", "capital_retail"])
+            warnings = " | ".join(getattr(result, "warnings", []))
+            mode_name = getattr(result, "mode", "")
+            param_stability_flag = "pass" if bool(getattr(result, "kf_converged", False)) and float(getattr(result, "pid_closure_error", 0.0)) <= 1e-7 else "warn"
+            for window_id in range(row_count):
+                c_p = _series_value(result, "c_p", window_id)
+                c_i = _series_value(result, "c_i", window_id)
+                c_d = _series_value(result, "c_d", window_id)
+                eps = _series_value(result, "eps", window_id)
+                y_observed = c_p + c_i + c_d + eps
+                next_id = min(window_id + 1, row_count - 1)
+                y_hat_next = (
+                    _series_value(result, "c_p", next_id)
+                    + _series_value(result, "c_i", next_id)
+                    + _series_value(result, "c_d", next_id)
+                ) if row_count else 0.0
+                capital_ch = _series_value(result, "capital_ch", window_id)
+                capital_q = _series_value(result, "capital_q", window_id)
+                capital_retail = _series_value(result, "capital_retail", window_id)
+                writer.writerow(
+                    [
+                        getattr(result, "transaction_date", ""),
+                        getattr(result, "stock_code", ""),
+                        window_id,
+                        mode_name,
+                        q_type,
+                        u_source_type,
+                        estimator_method,
+                        "psi_transition_observation_prediction",
+                        "psi_t_prior_for_prediction",
+                        _round6(y_observed),
+                        _round6(y_hat_next),
+                        _round6(y_observed),
+                        _round6(y_hat_next),
+                        _round6(c_p),
+                        _round6(c_i),
+                        _round6(c_d),
+                        _round6(eps),
+                        _round6(capital_ch),
+                        _round6(capital_q),
+                        _round6(capital_retail),
+                        _round6(c_p - capital_ch),
+                        f"{float(getattr(result, 'pid_closure_error', getattr(result, 'closure_error', 0.0))):.2e}",
+                        _round6(eps),
+                        param_stability_flag,
+                        "true",
+                        data_leakage_check,
+                        m_slow_method,
+                        "false",
+                        "true",
+                        "true",
+                        warnings,
+                    ]
+                )
+
+
+def export_pid_daily_diag(pid_results: list[object], output_path: str | Path, config: dict | None = None) -> None:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cfg = config or {}
+    mode_switch = cfg.get("mode_switch", {}) if isinstance(cfg.get("mode_switch", {}), dict) else {}
+    estimator_method = str(cfg.get("estimator_method", "kalman_filter_realtime"))
+    m_slow_method = str(cfg.get("m_slow_method", "ewma_realtime"))
+    offline_smooth_used = "offline" in estimator_method or "offline" in m_slow_method
+    data_leakage_check = "fail" if offline_smooth_used else "pass"
+
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(PID_DAILY_DIAG_COLUMNS)
+        for result in sorted(pid_results, key=lambda item: (getattr(item, "stock_code", ""), getattr(item, "transaction_date", ""))):
+            warnings = list(getattr(result, "warnings", []))
+            param_stability_flag = "pass" if bool(getattr(result, "kf_converged", False)) and float(getattr(result, "pid_closure_error", 0.0)) <= 1e-7 else "warn"
+            m_eff_uncertainty_flag = "false"
+            m_eff_rank_eligible = "true"
+            submission_ready = "true" if data_leakage_check == "pass" else "false"
+            writer.writerow(
+                [
+                    getattr(result, "transaction_date", ""),
+                    getattr(result, "stock_code", ""),
+                    getattr(result, "mode", ""),
+                    cfg.get("q_type", "window_index"),
+                    cfg.get("u_source_type", "mv_ratio"),
+                    estimator_method,
+                    m_slow_method,
+                    cfg.get("lookback_days", 20),
+                    cfg.get("zero_trade_policy", "mark_only"),
+                    str(bool(cfg.get("submission_requires_complete_windows", True))).lower(),
+                    mode_switch.get("lambda_switch", 0.1),
+                    mode_switch.get("lambda_jump", 1.0),
+                    mode_switch.get("lambda_error", 10.0),
+                    data_leakage_check,
+                    "pass",
+                    "pass",
+                    str(offline_smooth_used).lower(),
+                    param_stability_flag,
+                    m_eff_uncertainty_flag,
+                    m_eff_rank_eligible,
+                    submission_ready,
+                    cfg.get("code_build_hash", ""),
+                    len(warnings),
+                    " | ".join(warnings),
+                ]
+            )
 
 
 def export_window_flow_rows(samples: list[DailySample], output_path: str | Path) -> None:

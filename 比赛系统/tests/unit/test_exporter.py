@@ -13,6 +13,8 @@ if str(SRC_DIR) not in sys.path:
 
 from exporter import (
     export_pid_tail_diagnostics,
+    export_pid_daily_diag,
+    export_pid_window_diag,
     build_submit_zip,
     export_batch_diagnostics,
     export_market_pid_validation_report,
@@ -213,6 +215,41 @@ class ExporterTest(unittest.TestCase):
             self.assertIn("beta_mix_tail", rows[0])
             beta_mix_index = rows[0].index("beta_mix_tail")
             self.assertEqual(rows[1][beta_mix_index], "0.123456")
+
+    def test_export_pid_standard_diag_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            result = DecompositionResult(stock_code="000001.SZ", transaction_date="20260710")
+            result.mode = "baseline_4d"
+            result.kf_converged = True
+            result.c_p[-1] = 0.2
+            result.c_i[-1] = 0.03
+            result.c_d[-1] = -0.01
+            result.eps[-1] = 0.005
+            result.capital_ch[-1] = 0.12
+            result.capital_q[-1] = 0.05
+            result.capital_retail[-1] = 0.03
+            cfg = {
+                "q_type": "window_index",
+                "u_source_type": "mv_ratio",
+                "estimator_method": "kalman_filter_realtime",
+                "m_slow_method": "ewma_realtime",
+                "mode_switch": {"lambda_switch": 0.1, "lambda_jump": 1.0, "lambda_error": 10.0},
+            }
+
+            export_pid_window_diag([result], base / "pid_window_diag.csv", cfg)
+            export_pid_daily_diag([result], base / "pid_daily_diag.csv", cfg)
+
+            with (base / "pid_window_diag.csv").open("r", encoding="utf-8-sig", newline="") as fh:
+                window_rows = list(csv.reader(fh))
+            with (base / "pid_daily_diag.csv").open("r", encoding="utf-8-sig", newline="") as fh:
+                daily_rows = list(csv.reader(fh))
+
+            self.assertIn("state_space_contract", window_rows[0])
+            self.assertIn("y_hat_next", window_rows[0])
+            self.assertIn("data_leakage_check", daily_rows[0])
+            self.assertIn("lambda_switch", daily_rows[0])
+            self.assertEqual(daily_rows[1][daily_rows[0].index("data_leakage_check")], "pass")
 
     def test_validate_submission_files_rejects_duplicate_stock_date(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

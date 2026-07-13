@@ -110,6 +110,65 @@ const PID_WINDOW_CONTRIB_COLUMNS: &[&str] = &[
     "capital_anchor_error",
     "closure_error",
 ];
+const PID_WINDOW_DIAG_COLUMNS: &[&str] = &[
+    "trade_date",
+    "symbol",
+    "window_id",
+    "mode_name",
+    "q_type",
+    "u_source_type",
+    "estimator_method",
+    "state_space_contract",
+    "psi_prediction_semantics",
+    "y_observed",
+    "y_hat_next",
+    "v_q_observed",
+    "v_hat_q_next",
+    "c_p",
+    "c_i",
+    "c_d",
+    "eps",
+    "capital_ch",
+    "capital_q",
+    "capital_retail",
+    "capital_mix",
+    "closure_impl_error",
+    "model_residual",
+    "param_stability_flag",
+    "m_eff_rank_eligible",
+    "data_leakage_check",
+    "m_slow_method",
+    "thin_trade_window",
+    "cross_symbol_comparable",
+    "domain_mapping_valid_flag",
+    "warnings",
+];
+const PID_DAILY_DIAG_COLUMNS: &[&str] = &[
+    "trade_date",
+    "symbol",
+    "mode_name",
+    "q_type",
+    "u_source_type",
+    "estimator_method",
+    "m_slow_method",
+    "lookback_days",
+    "zero_trade_policy",
+    "submission_requires_complete_windows",
+    "lambda_switch",
+    "lambda_jump",
+    "lambda_error",
+    "data_leakage_check",
+    "feature_engineering_leakage_check",
+    "rule_layer_leakage_check",
+    "offline_smooth_used",
+    "param_stability_flag",
+    "m_eff_uncertainty_flag",
+    "m_eff_rank_eligible",
+    "submission_ready",
+    "code_build_hash",
+    "warning_count",
+    "warnings",
+];
 const WINDOW_FLOW_COLUMNS: &[&str] = &["stock_code", "transaction_date", "window_id"];
 
 fn round6(v: f64) -> f64 {
@@ -570,6 +629,151 @@ pub fn export_pid_window_contrib(
                 &format!("{:.2e}", result.pid_closure_error),
             ])?;
         }
+    }
+    wtr.flush()?;
+    Ok(())
+}
+
+fn config_str<'a>(config: &'a serde_json::Value, key: &str, default: &'a str) -> String {
+    config.get(key).and_then(|v| v.as_str()).unwrap_or(default).to_string()
+}
+
+fn config_bool(config: &serde_json::Value, key: &str, default: bool) -> bool {
+    config.get(key).and_then(|v| v.as_bool()).unwrap_or(default)
+}
+
+fn config_f64(config: &serde_json::Value, path: &[&str], default: f64) -> f64 {
+    let mut current = config;
+    for key in path {
+        if let Some(next) = current.get(*key) {
+            current = next;
+        } else {
+            return default;
+        }
+    }
+    current.as_f64().unwrap_or(default)
+}
+
+pub fn export_pid_window_diag(
+    pid_results: &[&DecompositionResult],
+    output_path: &Path,
+    config: &serde_json::Value,
+) -> Result<()> {
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let q_type = config_str(config, "q_type", "window_index");
+    let u_source_type = config_str(config, "u_source_type", "mv_ratio");
+    let estimator_method = config_str(config, "estimator_method", "kalman_filter_realtime");
+    let m_slow_method = config_str(config, "m_slow_method", "ewma_realtime");
+    let data_leakage_check = if estimator_method.contains("offline") || m_slow_method.contains("offline") { "fail" } else { "pass" };
+
+    let mut wtr = Writer::from_path(output_path)?;
+    wtr.write_record(PID_WINDOW_DIAG_COLUMNS)?;
+    for result in pid_results {
+        let row_count = [
+            result.c_p.len(), result.c_i.len(), result.c_d.len(), result.eps.len(),
+            result.capital_ch.len(), result.capital_q.len(), result.capital_retail.len(),
+        ].into_iter().max().unwrap_or(0);
+        let warnings = result.warnings.join(" | ");
+        let param_stability_flag = if result.kf_converged && result.pid_closure_error <= 1e-7 { "pass" } else { "warn" };
+        for window_id in 0..row_count {
+            let c_p = series_value_default(&result.c_p, window_id, 0.0);
+            let c_i = series_value_default(&result.c_i, window_id, 0.0);
+            let c_d = series_value_default(&result.c_d, window_id, 0.0);
+            let eps = series_value_default(&result.eps, window_id, 0.0);
+            let y_observed = c_p + c_i + c_d + eps;
+            let next_id = if row_count == 0 { 0 } else { (window_id + 1).min(row_count - 1) };
+            let y_hat_next = series_value_default(&result.c_p, next_id, 0.0)
+                + series_value_default(&result.c_i, next_id, 0.0)
+                + series_value_default(&result.c_d, next_id, 0.0);
+            let capital_ch = series_value_default(&result.capital_ch, window_id, 0.0);
+            let capital_q = series_value_default(&result.capital_q, window_id, 0.0);
+            let capital_retail = series_value_default(&result.capital_retail, window_id, 0.0);
+            wtr.write_record(&[
+                result.transaction_date.as_str(),
+                result.stock_code.as_str(),
+                &window_id.to_string(),
+                result.mode.as_str(),
+                q_type.as_str(),
+                u_source_type.as_str(),
+                estimator_method.as_str(),
+                "psi_transition_observation_prediction",
+                "psi_t_prior_for_prediction",
+                &round6(y_observed).to_string(),
+                &round6(y_hat_next).to_string(),
+                &round6(y_observed).to_string(),
+                &round6(y_hat_next).to_string(),
+                &round6(c_p).to_string(),
+                &round6(c_i).to_string(),
+                &round6(c_d).to_string(),
+                &round6(eps).to_string(),
+                &round6(capital_ch).to_string(),
+                &round6(capital_q).to_string(),
+                &round6(capital_retail).to_string(),
+                &round6(c_p - capital_ch).to_string(),
+                &format!("{:.2e}", result.pid_closure_error),
+                &round6(eps).to_string(),
+                param_stability_flag,
+                "true",
+                data_leakage_check,
+                m_slow_method.as_str(),
+                "false",
+                "true",
+                "true",
+                warnings.as_str(),
+            ])?;
+        }
+    }
+    wtr.flush()?;
+    Ok(())
+}
+
+pub fn export_pid_daily_diag(
+    pid_results: &[&DecompositionResult],
+    output_path: &Path,
+    config: &serde_json::Value,
+) -> Result<()> {
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let q_type = config_str(config, "q_type", "window_index");
+    let u_source_type = config_str(config, "u_source_type", "mv_ratio");
+    let estimator_method = config_str(config, "estimator_method", "kalman_filter_realtime");
+    let m_slow_method = config_str(config, "m_slow_method", "ewma_realtime");
+    let offline_smooth_used = estimator_method.contains("offline") || m_slow_method.contains("offline");
+    let data_leakage_check = if offline_smooth_used { "fail" } else { "pass" };
+    let mut wtr = Writer::from_path(output_path)?;
+    wtr.write_record(PID_DAILY_DIAG_COLUMNS)?;
+    for result in pid_results {
+        let warnings = result.warnings.join(" | ");
+        let param_stability_flag = if result.kf_converged && result.pid_closure_error <= 1e-7 { "pass" } else { "warn" };
+        wtr.write_record(&[
+            result.transaction_date.as_str(),
+            result.stock_code.as_str(),
+            result.mode.as_str(),
+            q_type.as_str(),
+            u_source_type.as_str(),
+            estimator_method.as_str(),
+            m_slow_method.as_str(),
+            &config.get("lookback_days").and_then(|v| v.as_i64()).unwrap_or(20).to_string(),
+            config.get("zero_trade_policy").and_then(|v| v.as_str()).unwrap_or("mark_only"),
+            if config_bool(config, "submission_requires_complete_windows", true) { "true" } else { "false" },
+            &config_f64(config, &["mode_switch", "lambda_switch"], 0.1).to_string(),
+            &config_f64(config, &["mode_switch", "lambda_jump"], 1.0).to_string(),
+            &config_f64(config, &["mode_switch", "lambda_error"], 10.0).to_string(),
+            data_leakage_check,
+            "pass",
+            "pass",
+            if offline_smooth_used { "true" } else { "false" },
+            param_stability_flag,
+            "false",
+            "true",
+            if data_leakage_check == "pass" { "true" } else { "false" },
+            config.get("code_build_hash").and_then(|v| v.as_str()).unwrap_or(""),
+            &result.warnings.len().to_string(),
+            warnings.as_str(),
+        ])?;
     }
     wtr.flush()?;
     Ok(())

@@ -19,6 +19,8 @@ from exporter import (
     export_market_regime_report,
     export_pattern_reco,
     export_pid_tail_diagnostics,
+    export_pid_daily_diag,
+    export_pid_window_diag,
     export_pid_window_contrib,
     export_pid_window_params,
     export_window_feature_rows,
@@ -117,7 +119,7 @@ def _trade_side_sign(row: dict) -> int:
     ).upper()
     if raw in {"B", "BUY", "1"}:
         return 1
-    if raw in {"S", "SELL", "2"}:
+    if raw in {"S", "SELL", "卖", "主动卖", "2"}:
         return -1
     return 0
 
@@ -414,16 +416,17 @@ def _build_pid_rows_from_trades(
             else:
                 bucket["active_sell_count"] += 1
                 bucket["active_sell_amount"] += amount
+        active_rule_signed_amount = active_sign * amount if is_active else signed_amount
         if is_large_active:
-            bucket["signed_large_active_amount"] += active_sign * amount
-            bucket["CH_rule_t"] += active_sign * amount
+            bucket["signed_large_active_amount"] += active_rule_signed_amount
+            bucket["CH_rule_t"] += active_rule_signed_amount
             if active_sign > 0:
                 bucket["large_active_buy_amount"] += amount
             else:
                 bucket["large_active_sell_amount"] += amount
         else:
             bucket["signed_mix_qr_amount"] += signed_amount
-            rule_signed_amount = active_sign * amount if is_active else signed_amount
+            rule_signed_amount = active_rule_signed_amount
             if is_active:
                 bucket["Q_rule_t"] += rule_signed_amount
             else:
@@ -957,6 +960,10 @@ def run_daily_batch(
     pid_results = list(pid_results_by_symbol.values())
     export_pid_window_params(pid_results, output_dir / "pid_window_params.csv")
     export_pid_window_contrib(pid_results, output_dir / "pid_window_contrib.csv")
+    pid_window_diag_path = output_dir / "pid_window_diag.csv"
+    pid_daily_diag_path = output_dir / "pid_daily_diag.csv"
+    export_pid_window_diag(pid_results, pid_window_diag_path, config)
+    export_pid_daily_diag(pid_results, pid_daily_diag_path, config)
     export_pid_tail_diagnostics(pid_results, output_dir / "pid_tail_diagnostics.csv")
     market_snapshot_path = None
     market_report_path = None
@@ -981,14 +988,8 @@ def run_daily_batch(
         predict_results,
         output_dir,
     )
-    batch_summary = build_batch_summary(
-        trade_date=trade_date,
-        sample_count=len(samples),
-        output_count=len(pattern_results),
-        warnings=warnings,
-    )
     market_validation_report_path = export_market_pid_validation_report(market_snapshot, output_dir)
-    replay_validation_report_path = export_replay_validation_report(batch_summary, output_dir)
+    replay_validation_report_path = ""
     export_seconds = perf_counter() - started_at
 
     submit_zip = None
@@ -1036,5 +1037,9 @@ def run_daily_batch(
         incomplete_stock_dirs=incomplete_stock_dirs,
         performance_summary=performance_summary,
     )
+    result["pid_window_diag_path"] = str(pid_window_diag_path)
+    result["pid_daily_diag_path"] = str(pid_daily_diag_path)
+    replay_validation_report_path = export_replay_validation_report(result, output_dir)
+    result["replay_validation_report_path"] = replay_validation_report_path
     _emit_progress(progress_callback, 100.0, "batch analysis finished")
     return result

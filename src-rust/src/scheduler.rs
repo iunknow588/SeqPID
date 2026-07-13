@@ -1,6 +1,4 @@
 ﻿use crate::capital_model::predict_capitals;
-use crate::batch_alerts::{build_batch_warnings, collect_missing_symbols, incomplete_stock_dirs_to_json};
-use crate::batch_reporting::{build_batch_result, build_batch_summary, build_performance_summary};
 use crate::config::{ConfigMap, get_bool};
 use crate::exporter;
 use crate::market_pid::{attach_market_relative_metrics, estimate_market_pid};
@@ -1050,6 +1048,11 @@ pub fn run_daily_batch(td: &str, inp: &Path, out: &Path, cfg: &ConfigMap, ld: &C
     pid_tail_rows.sort_by(|a,b| a.stock_code.cmp(&b.stock_code));
     exporter::export_pid_window_params(&pid_tail_rows, &out.join("pid_window_params.csv"))?;
     exporter::export_pid_window_contrib(&pid_tail_rows, &out.join("pid_window_contrib.csv"))?;
+    let pid_window_diag_path = out.join("pid_window_diag.csv");
+    let pid_daily_diag_path = out.join("pid_daily_diag.csv");
+    let cfg_json = serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null);
+    exporter::export_pid_window_diag(&pid_tail_rows, &pid_window_diag_path, &cfg_json)?;
+    exporter::export_pid_daily_diag(&pid_tail_rows, &pid_daily_diag_path, &cfg_json)?;
     exporter::export_pid_tail_diagnostics(&pid_tail_rows, &out.join("pid_tail_diagnostics.csv"))?;
     let mut msp: Option<String>=None; let mut mrp: Option<String>=None;
     if let Some(ref sn)=msn {
@@ -1096,12 +1099,24 @@ pub fn run_daily_batch(td: &str, inp: &Path, out: &Path, cfg: &ConfigMap, ld: &C
     r.insert("stock_offset".into(), serde_json::json!(so));
     r.insert("stock_limit".into(), sl.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null));
     r.insert("stock_universe_size".into(), su.as_ref().map(|s| serde_json::json!(s.len())).unwrap_or(serde_json::Value::Null));
+    r.insert(
+        "stock_list_file".into(),
+        slf.map(|path| serde_json::Value::String(path.to_string_lossy().to_string()))
+            .unwrap_or(serde_json::Value::Null),
+    );
     r.insert("warnings".into(),serde_json::Value::Array(w.iter().map(|w|serde_json::Value::String(w.clone())).collect()));
     if let Some(z)=sz{r.insert("submit_zip".into(),serde_json::Value::String(z));}
     if let Some(p)=msp{r.insert("market_snapshot_path".into(),serde_json::Value::String(p));}
     if let Some(p)=mrp{r.insert("market_report_path".into(),serde_json::Value::String(p));}
     r.insert("diagnostics_json_path".into(),serde_json::Value::String(dj));
     r.insert("distribution_csv_path".into(),serde_json::Value::String(dc));
+    r.insert("pid_window_diag_path".into(),serde_json::Value::String(pid_window_diag_path.to_string_lossy().to_string()));
+    r.insert("pid_daily_diag_path".into(),serde_json::Value::String(pid_daily_diag_path.to_string_lossy().to_string()));
+    let market_validation_report_path = exporter::export_market_pid_validation_report(msn.as_ref(), out)?;
+    r.insert("market_validation_report_path".into(), serde_json::Value::String(market_validation_report_path));
+    let replay_payload = serde_json::to_value(&r).unwrap_or(serde_json::Value::Null);
+    let replay_validation_report_path = exporter::export_replay_validation_report(&replay_payload, out)?;
+    r.insert("replay_validation_report_path".into(), serde_json::Value::String(replay_validation_report_path));
     if let Some(p)=psm{r.insert("performance_summary".into(),p);}
     progress(100.0, "batch analysis finished");
     Ok(r)

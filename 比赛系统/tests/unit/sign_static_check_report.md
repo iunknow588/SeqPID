@@ -14,7 +14,7 @@
 - `PASS` rule event stores signed amount (src\capital_rule_engine.py)
 - `PASS` rule window accumulates signed amount (src\capital_rule_engine.py)
 - `PASS` legacy signed buckets keep signed amount (src\capital_rule_engine.py)
-- `PASS` pid reads official signed rule fields (src\pid_decomposer.py)
+- `PASS` pid reads official signed rule fields (src\pid_decomposer_shared.py)
 - `PASS` capital model rule flow intention uses signed direction (src\capital_model.py)
 
 ## Gross Display Fields

@@ -90,6 +90,9 @@ def _resolve_stock_list_file(
         return _resolve_path(str(stock_list_file))
 
     candidates = [
+        resolved_input_dir / "\u767e\u53ea\u80a1\u7968\u6837\u672c.csv",
+        resolved_input_dir.parent / "\u767e\u53ea\u80a1\u7968\u6837\u672c.csv",
+        EXTERNAL_ROOT / "data" / "\u767e\u53ea\u80a1\u7968\u6837\u672c.csv",
         resolved_input_dir / "百只股票样本.csv",
         resolved_input_dir.parent / "百只股票样本.csv",
         EXTERNAL_ROOT / "data" / "百只股票样本.csv",
