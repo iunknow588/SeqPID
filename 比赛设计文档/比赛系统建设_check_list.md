@@ -1,7 +1,7 @@
 # 天池赛题一：比赛系统建设 Check List
 
-**版本：** V1.7  
-**日期：** 2026-07-13  
+**版本：** V1.8  
+**日期：** 2026-07-14  
 **文档定位：** 重构准备与实现闭环核对版  
 **适用范围：**
 
@@ -33,6 +33,8 @@
 11. 4D/5D 模式切换必须固定 `5/3/2` 滞回、`lambda_switch / lambda_jump / lambda_error` 和参数跳变阈值，提交期不得动态调参。
 12. `beta_norm / m_eff / m_slow` 进入画像前必须通过同口径、市值占比流、截断、不确定性、实时方法白名单和流动性分组可比性检查。
 13. 双域映射和 `kappa_t` 只作诊断；零成交、薄成交或 `domain_mapping_valid_flag = false` 时不得进入排名或正式标签判断。
+14. `baseline_4d` 的正式结构化外力输出是 `capital_ch / capital_mix`；若展示 `capital_q / capital_retail`，必须标记为诊断分摊近似。
+15. 48 个基础窗口的理论依据必须统一写明为“A 股连续竞价 240 分钟 / 5 分钟粒度”。
 
 ---
 
@@ -43,17 +45,19 @@
 - 所有设计文档必须明确“成交量/窗口序号可作为交易时间 `q`”这一假设。
 - 所有设计文档不得再把一阶模型写成与二阶模型并列的理论解释。
 - 若文档中出现一阶公式，只能标注为工程近似、降阶模型或稳健实现备选。
+- 所有设计文档必须把 `v_q,t` 与 `P_state,t` 的关系标注为“观测定义/状态重构恒等式”，不得写成第三套独立状态转移。
 - `beta_norm / m_eff` 必须说明同一 `U_*_mv_ratio` 输入口径、截断标记和不确定性边界。
 - 详细设计、概要设计和清单中的模式名、零成交策略、泄漏字段与回退规则必须一致。
 - 所有正式提交路径必须显式记录 `data_leakage_check` 和 `m_eff_uncertainty_flag`。
 - 概要、详细和建设清单必须同步写明标准状态空间三式、模式切换 `lambda` 范围、流动性分组可比性和薄成交窗口降级。
+- Jury 稳定性描述必须统一区分“完整冻结窗口判据”“快速启发式筛查”和“时变参数滚动诊断”三层口径。
 - `m_slow_method` 的默认优先级必须解释为工程稳健性排序，不能写成理论最优性结论。
 
 | 检查项 | 目标状态 | 当前状态 | 下一步 |
 |---|---|---|---|
 | 比赛概要设计版本 | V1.6 | `已更新` | 已对齐 PID/物理模型和实时/离线边界 |
 | 比赛详细设计版本 | V1.7 | `已更新` | 已补观测预测分离、诊断字段、泄漏和稳定性验收 |
-| PID 算法与实现 | V1.7 口径 | `已对齐` | 作为 PID 重构主依据 |
+| PID 算法与实现 | V1.8 口径 | `已对齐` | 已补状态层级、Jury 判据和 4D 诊断分摊边界 |
 | 资金类型判断规范 | V1.1 | `已确认` | 作为规则层主依据 |
 | PID 原理与实现 | V1.1 | `已确认` | 作为结构反解主依据 |
 | Task 1 输出文件名 | `pattern_reco.csv` | `已实现` | 重构期间不得改变 |
@@ -135,10 +139,12 @@
 | 清理展示分摊主口径 | PID selector/shared/4D/5D 链路 | `delta_*_display` 不参与 `capital_type` 主判断，debug 显式输出主判断来源 | `已完成` |
 | 4D / 5D 文件级拆分 | `src/pid_decomposer.py` / `src/pid_decomposer_shared.py` / `src/pid_decomposer_4d.py` / `src/pid_decomposer_5d.py` | 4D 与 5D 逻辑独立、上层统一通过 selector 调用 | `已完成` |
 | 市场 PID 主聚合口径 | `src/market_pid.py` | 优先使用 `c_p / c_i / c_d`，fallback 必须记录来源，不得把规则流直接当模型外力贡献 | `已完成` |
-| 实时/离线方法边界 | PID selector/shared | 实时路径禁止 RTS/HP/全样本平滑，离线方法必须显式标记 | `待复核` |
-| 等效质量安全边界 | PID shared / StateFeature | 同口径 `beta_norm`；截断或置信区间过宽时 `m_eff_rank_eligible = false` | `待复核` |
+| 实时/离线方法边界 | PID selector/shared | 实时路径禁止 RTS/HP/全样本平滑，离线方法必须显式标记 | `已对齐` |
+| 等效质量安全边界 | PID shared / StateFeature | 同口径 `beta_norm`；截断或置信区间过宽时 `m_eff_rank_eligible = false` | `部分完成` |
 | 观测/预测字段分离 | `src/schemas.py` / exporter | `y_observed / y_hat_next / v_q_observed / v_hat_q_next` 不覆盖 | `待复核` |
 | 状态空间三式验收 | PID selector/shared/4D/5D 链路 | `psi_t` 转移、`y_t` 观测、`y_hat_t+1|t` 预测分层，价格重构关系不作为独立状态方程 | `待复核` |
+| 4D 诊断分摊边界 | PID selector/shared/4D/5D 链路 / `src/schemas.py` | `baseline_4d` 正式输出为 `capital_mix`，`capital_q / capital_retail` 若存在必须标记诊断近似且不参与主判断 | `已对齐` |
+| 48 窗口理论口径 | `src/windowing.py` / 配置文件 / 文档 | 固定为连续竞价 240 分钟按 5 分钟切分，跨文档与代码注释一致 | `待复核` |
 | 模式切换超参冻结 | PID shared / 配置文件 | `lambda_switch / lambda_jump / lambda_error` 和 `K_up / K_down` 训练前固定，输出敏感性报告 | `待复核` |
 | 流动性可比性与薄成交窗口 | PID shared / market_pid / exporter | 输出 `liquidity_group / cross_symbol_comparable / thin_trade_window / domain_mapping_valid_flag` | `待执行` |
 | `m_slow` 方法优先级 | PID shared / 配置文件 | 默认 `ewma_realtime`，卡尔曼滤波需离线验证优于基线后启用 | `待复核` |
@@ -169,9 +175,9 @@
 | 市场 PID 口径报告 | `reports/validation/market_pid_validation_report.md` | 明确上涨/下跌家数、相对市场偏离计算 | `已完成` |
 | 100 股回放报告 | `reports/validation/100_stock_replay_report.md` | 记录行数、缺失补位、耗时、警告 | `已完成` |
 | 状态特征字段契约 | `reports/validation/state_feature_contract.md` | 对齐 `CapitalBehaviorEvent / CapitalRuleWindowFeature / StateFeature` | `已完成` |
-| PID 窗口诊断契约 | `reports/validation/pid_window_diag_contract.md` | 覆盖 `P_state / P_wv_window / y_hat / m_eff / leakage` 字段 | `待执行` |
-| 日级泄漏审计 | `reports/validation/leakage_audit_report.md` | 覆盖特征工程、标准化、规则层、运行时方法白名单 | `待执行` |
-| PID 稳定性报告 | `reports/validation/pid_stability_report.md` | 覆盖特征根/Jury、参数回退、m_eff 不确定性 | `待执行` |
+| PID 窗口诊断契约 | `reports/validation/pid_window_diag_contract.md` | 覆盖 `P_state / P_wv_window / y_hat / m_eff / leakage` 字段 | `已完成` |
+| 日级泄漏审计 | `reports/validation/leakage_audit_report.md` | 覆盖特征工程、标准化、规则层、运行时方法白名单 | `部分完成` |
+| PID 稳定性报告 | `reports/validation/pid_stability_report.md` | 覆盖特征根/Jury、参数回退、m_eff 不确定性 | `部分完成` |
 
 ---
 
@@ -298,11 +304,27 @@
 |---|---|---|
 | V1.6 | 2026-07-11 | 补充统一 PID/规则口径、默认 `baseline_4d` 运行态与市场 PID 主聚合约束 |
 | V1.7 | 2026-07-13 | 对齐 PID/金融物理模型最新口径，补充观测预测分离、稳定性回退、等效质量不确定性、防泄漏审计与诊断交付物 |
+| V1.9 | 2026-07-14 | 吸收评审结论并补齐诊断验收件，新增 `pid_window_diag_contract.md / leakage_audit_report.md / pid_stability_report.md`，同步 `m_eff` 诊断代理状态 |
 | V1.8 | 2026-07-13 | 同步状态空间三式、模式切换 lambda、流动性可比性、薄成交窗口和 `m_slow` 工程优先级检查 |
 
 ---
 
 ## 9. 下一步执行建议
+
+## 8.1 2026-07-14 补充验收项
+
+新增 P0/P1 验收项：
+
+- [ ] Rust 与 Python 统一识别 `empty_raw_file / null_filled_raw_file / invalid_raw_schema / no_effective_rows`
+- [ ] 生成 `raw_data_quality_report.csv`
+- [ ] `raw_data_quality_report.csv` 覆盖 `trade / order / quote` 三类原始文件
+- [ ] 补全样本进入 `pid_daily_diag.csv`
+- [ ] 补全样本日级诊断包含 `sample_origin = imputed`
+- [ ] 补全样本日级诊断包含 `reason_code = missing_raw_data_imputed`
+- [ ] 补全样本日级诊断固定 `m_eff_rank_eligible = false`
+- [ ] Python 与 Rust 的 `pid_daily_diag.csv` 股票覆盖范围一致
+- [ ] Python 与 Rust 的 `raw_data_quality_report.csv` 质量状态口径一致
+- [ ] `100_stock_replay_report.md` 中 `stock_universe_size / imputed_output_count / missing_symbol_count` 与实际结果一致
 
 1. 先做阶段 A：拆 `data_loader.py` 与 `windowing.py`，保持行为不变。
 2. 再做阶段 B：显式 `capital_rule_engine.py`，统一 `CH_rule / Q_rule / R_seed`。

@@ -14,6 +14,7 @@ pub struct PIDDecomposer {
     convergence_window: usize,
     kappa_i: f64,
     anchor_error_max: f64,
+    baseline_4d_hot_money_dominant_threshold: f64,
     eps: f64,
     clip_limit: f64,
 }
@@ -57,6 +58,11 @@ impl PIDDecomposer {
             convergence_window: get_f64(&kf_cfg, "convergence_window", 10.0).max(1.0) as usize,
             kappa_i: get_f64(&pid_cfg, "kappa_i", get_f64(config, "kappa_i", 0.5)),
             anchor_error_max: get_f64(&pid_cfg, "capital_anchor_error_max", 0.4),
+            baseline_4d_hot_money_dominant_threshold: get_f64(
+                &pid_cfg,
+                "baseline_4d_hot_money_dominant_threshold",
+                get_f64(&pid_cfg, "capital_structural_strong_ratio", 0.46),
+            ),
             eps: 1e-8,
             clip_limit: 3.0,
         }
@@ -113,6 +119,7 @@ impl PIDDecomposer {
         let mut c_d = vec![0.0; t_len];
         let mut eps_smooth = vec![0.0; t_len];
         let mut capital_ch = vec![0.0; t_len];
+        let mut capital_mix = vec![0.0; t_len];
         let mut capital_q = vec![0.0; t_len];
         let mut capital_retail = vec![0.0; t_len];
         let mut anchor_error = vec![f64::NAN; t_len];
@@ -147,24 +154,25 @@ impl PIDDecomposer {
 
             capital_ch[t] = beta_ch[t] * u_ch_prev;
             if mode_name == "baseline_4d" {
-                let capital_mix = beta_q[t] * u_mix_prev;
+                capital_mix[t] = beta_q[t] * u_mix_prev;
                 let qr_abs = u_q_prev.abs() + u_retail_prev.abs();
                 if qr_abs > self.eps {
-                    capital_q[t] = capital_mix * u_q_prev.abs() / qr_abs;
-                    capital_retail[t] = capital_mix * u_retail_prev.abs() / qr_abs;
+                    capital_q[t] = capital_mix[t] * u_q_prev.abs() / qr_abs;
+                    capital_retail[t] = capital_mix[t] * u_retail_prev.abs() / qr_abs;
                 } else {
-                    capital_q[t] = capital_mix;
+                    capital_q[t] = capital_mix[t];
                     capital_retail[t] = 0.0;
                 }
             } else {
                 capital_q[t] = beta_q[t] * u_q_prev;
                 capital_retail[t] = beta_retail[t] * u_retail_prev;
+                capital_mix[t] = capital_q[t] + capital_retail[t];
             }
 
             let ch_anchor = features.ch_anchor[t];
             let mix_qr = features.mix_qr[t];
             let anchor_total = ch_anchor.abs() + mix_qr.abs();
-            let external_total = capital_ch[t].abs() + capital_q[t].abs() + capital_retail[t].abs();
+            let external_total = capital_ch[t].abs() + capital_mix[t].abs();
             if ch_anchor.is_finite()
                 && mix_qr.is_finite()
                 && anchor_total > self.eps
@@ -183,13 +191,28 @@ impl PIDDecomposer {
                     u_retail_prev.abs() / flow_abs_sum,
                 )
             } else {
-                let external_abs_sum = capital_ch[t].abs() + capital_q[t].abs() + capital_retail[t].abs();
+                let external_abs_sum = capital_ch[t].abs() + capital_mix[t].abs();
                 if external_abs_sum > self.eps {
-                    (
-                        capital_ch[t].abs() / external_abs_sum,
-                        capital_q[t].abs() / external_abs_sum,
-                        capital_retail[t].abs() / external_abs_sum,
-                    )
+                    let w_ch = capital_ch[t].abs() / external_abs_sum;
+                    if mode_name == "baseline_4d" {
+                        let mix_weight = capital_mix[t].abs() / external_abs_sum;
+                        let qr_abs = u_q_prev.abs() + u_retail_prev.abs();
+                        if qr_abs > self.eps {
+                            (
+                                w_ch,
+                                mix_weight * u_q_prev.abs() / qr_abs,
+                                mix_weight * u_retail_prev.abs() / qr_abs,
+                            )
+                        } else {
+                            (w_ch, mix_weight, 0.0)
+                        }
+                    } else {
+                        (
+                            w_ch,
+                            capital_q[t].abs() / external_abs_sum,
+                            capital_retail[t].abs() / external_abs_sum,
+                        )
+                    }
                 } else {
                     (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
                 }
@@ -227,7 +250,13 @@ impl PIDDecomposer {
         let alloc_closure_error = max_abs_diff(&total_alloc, &features.delta_p);
         let closure_error = max_abs_diff(&total_display, &features.delta_p);
         let capital_total: Vec<f64> = (0..t_len)
-            .map(|i| capital_ch[i] + capital_q[i] + capital_retail[i])
+            .map(|i| {
+                if mode_name == "baseline_4d" {
+                    capital_ch[i] + capital_mix[i]
+                } else {
+                    capital_ch[i] + capital_q[i] + capital_retail[i]
+                }
+            })
             .collect();
         let capital_cp_identity_error = max_abs_diff(&capital_total, &c_p);
         let capital_ci_identity_error = 0.0;
@@ -281,8 +310,14 @@ impl PIDDecomposer {
             c_d,
             eps: eps_smooth,
             capital_ch: capital_ch.clone(),
+            capital_mix: capital_mix.clone(),
             capital_q: capital_q.clone(),
             capital_retail: capital_retail.clone(),
+            price_basis: features.price_basis.clone(),
+            u_ch_amount_ratio: features.u_ch_amount_ratio.clone(),
+            u_q_amount_ratio: features.u_q_amount_ratio.clone(),
+            u_retail_amount_ratio: features.u_retail_amount_ratio.clone(),
+            u_mix_amount_ratio: features.u_mix_amount_ratio.clone(),
             capital_anchor_error: anchor_error,
             delta_ch: capital_ch,
             delta_q: capital_q,
@@ -331,6 +366,11 @@ impl PIDDecomposer {
         let mut u_q = vec![0.0; t_len];
         let mut u_retail = vec![0.0; t_len];
         let mut u_mix = vec![0.0; t_len];
+        let mut price_basis = vec![0.0; t_len];
+        let mut u_ch_amount_ratio = vec![0.0; t_len];
+        let mut u_q_amount_ratio = vec![0.0; t_len];
+        let mut u_retail_amount_ratio = vec![0.0; t_len];
+        let mut u_mix_amount_ratio = vec![0.0; t_len];
         let mut ch_anchor = vec![0.0; t_len];
         let mut mix_qr = vec![0.0; t_len];
 
@@ -343,6 +383,7 @@ impl PIDDecomposer {
             }
 
             let amount = parse_any(row, &["deal_amount", "amount"]).unwrap_or(0.0);
+            let close_price = parse_any(row, &["window_close_price", "close_price", "last_price"]).unwrap_or(0.0);
             let buy = parse_any(row, &["signal_deal_buy_amount", "buy_amount"]).unwrap_or(0.0);
             let sell = parse_any(row, &["signal_deal_sell_amount", "sell_amount"]).unwrap_or(0.0);
             let impact = parse_any(row, &["pi_max_price_impact_pct", "price_impact"]).unwrap_or(0.0);
@@ -375,6 +416,13 @@ impl PIDDecomposer {
             delta_p[t] = if has_explicit_anchor { impact } else { impact * sign };
             u_ch[t] = ch_anchor[t];
             u_mix[t] = mix_qr[t] * (1.0 + cancel.min(1.0));
+            price_basis[t] = close_price;
+            if amount.abs() > self.eps {
+                u_ch_amount_ratio[t] = ch_anchor[t] / amount;
+                u_q_amount_ratio[t] = u_q[t] / amount;
+                u_retail_amount_ratio[t] = u_retail[t] / amount;
+                u_mix_amount_ratio[t] = mix_qr[t] / amount;
+            }
         }
 
         let ch_anchor = self.adaptive_normalize(&ch_anchor);
@@ -385,6 +433,11 @@ impl PIDDecomposer {
             u_q,
             u_retail,
             u_mix,
+            price_basis,
+            u_ch_amount_ratio,
+            u_q_amount_ratio,
+            u_retail_amount_ratio,
+            u_mix_amount_ratio,
             ch_anchor,
             mix_qr,
         }
@@ -397,6 +450,11 @@ impl PIDDecomposer {
         let mut u_q = vec![0.0; t_len];
         let mut u_retail = vec![0.0; t_len];
         let mut u_mix = vec![0.0; t_len];
+        let price_basis = vec![0.0; t_len];
+        let u_ch_amount_ratio = vec![0.0; t_len];
+        let u_q_amount_ratio = vec![0.0; t_len];
+        let u_retail_amount_ratio = vec![0.0; t_len];
+        let u_mix_amount_ratio = vec![0.0; t_len];
         let mut ch_anchor = vec![0.0; t_len];
         let mut mix_qr = vec![0.0; t_len];
 
@@ -438,6 +496,11 @@ impl PIDDecomposer {
             u_q,
             u_retail,
             u_mix,
+            price_basis,
+            u_ch_amount_ratio,
+            u_q_amount_ratio,
+            u_retail_amount_ratio,
+            u_mix_amount_ratio,
             ch_anchor,
             mix_qr,
         }
@@ -598,16 +661,34 @@ impl PIDDecomposer {
             "quant" => *capital_q.last().unwrap_or(&0.0),
             _ => *capital_retail.last().unwrap_or(&0.0),
         };
+        let (dominant_type, dominant_value) = if self.mode_name == "baseline_4d" {
+            if hot_ratio >= self.baseline_4d_hot_money_dominant_threshold
+                && hot_ratio >= quant_ratio.max(retail_ratio)
+            {
+                ("游资", *capital_ch.last().unwrap_or(&0.0))
+            } else {
+                (
+                    "unknown",
+                    capital_ch.last().copied().unwrap_or(0.0)
+                        + capital_q.last().copied().unwrap_or(0.0)
+                        + capital_retail.last().copied().unwrap_or(0.0),
+                )
+            }
+        } else {
+            (
+                match dominant_key {
+                    "hot_money" => "游资",
+                    "quant" => "量化",
+                    _ => "散户",
+                },
+                dominant_value,
+            )
+        };
         DominantInfo {
             hot_money_ratio: hot_ratio,
             quant_ratio,
             retail_ratio,
-            dominant_type: match dominant_key {
-                "hot_money" => "游资",
-                "quant" => "量化",
-                _ => "散户",
-            }
-            .to_string(),
+            dominant_type: dominant_type.to_string(),
             dominant_intention: if dominant_value > 0.0 {
                 "买入"
             } else if dominant_value < 0.0 {
@@ -642,6 +723,11 @@ struct DecomposeInput {
     u_q: Vec<f64>,
     u_retail: Vec<f64>,
     u_mix: Vec<f64>,
+    price_basis: Vec<f64>,
+    u_ch_amount_ratio: Vec<f64>,
+    u_q_amount_ratio: Vec<f64>,
+    u_retail_amount_ratio: Vec<f64>,
+    u_mix_amount_ratio: Vec<f64>,
     ch_anchor: Vec<f64>,
     mix_qr: Vec<f64>,
 }
@@ -890,4 +976,19 @@ fn invert_matrix(matrix: [[f64; PID_DIM]; PID_DIM]) -> Option<[[f64; PID_DIM]; P
         }
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn baseline_4d_mixed_pool_stays_unknown_without_hot_money_dominance() {
+        let decomposer = PIDDecomposer::new(&HashMap::new());
+
+        let dominant = decomposer.determine_dominant(&[0.0, 0.1, 0.0], &[0.0, 0.4, 0.3], &[0.0, 0.2, 0.1]);
+
+        assert_eq!(dominant.dominant_type, "unknown");
+        assert_eq!(dominant.dominant_intention, "买入");
+    }
 }

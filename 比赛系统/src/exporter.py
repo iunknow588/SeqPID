@@ -135,6 +135,17 @@ PID_WINDOW_DIAG_COLUMNS = [
     "capital_q",
     "capital_retail",
     "capital_mix",
+    "beta_norm_ch_diag",
+    "beta_norm_q_diag",
+    "beta_norm_retail_diag",
+    "beta_norm_mix_diag",
+    "m_eff_ch_diag",
+    "m_eff_q_diag",
+    "m_eff_retail_diag",
+    "m_eff_mix_diag",
+    "beta_norm_unit",
+    "m_eff_source_type",
+    "m_eff_clipped_flag",
     "closure_impl_error",
     "model_residual",
     "param_stability_flag",
@@ -165,13 +176,44 @@ PID_DAILY_DIAG_COLUMNS = [
     "rule_layer_leakage_check",
     "offline_smooth_used",
     "param_stability_flag",
+    "beta_norm_unit",
+    "m_eff_source_type",
+    "m_eff_clipped_flag",
     "m_eff_uncertainty_flag",
     "m_eff_rank_eligible",
     "submission_ready",
+    "sample_origin",
+    "reason_code",
     "code_build_hash",
     "warning_count",
     "warnings",
 ]
+RAW_DATA_QUALITY_COLUMNS = [
+    "trade_date",
+    "symbol",
+    "file_role",
+    "file_path",
+    "file_exists",
+    "file_size",
+    "null_byte_ratio",
+    "encoding_used",
+    "header_valid",
+    "raw_row_count",
+    "effective_row_count",
+    "quality_status",
+    "reason_code",
+    "action",
+]
+
+
+def _resolve_m_eff_status(config: dict | None = None) -> tuple[str, str]:
+    cfg = config or {}
+    u_source_type = str(cfg.get("u_source_type", "mv_ratio"))
+    if u_source_type == "mv_ratio":
+        return "true", "false"
+    return "true", "false"
+
+
 WINDOW_FLOW_COLUMNS = [
     "stock_code",
     "transaction_date",
@@ -250,6 +292,104 @@ def _series_value(result: object, name: str, index: int, default: float = 0.0) -
     if numeric != numeric:
         return default
     return numeric
+
+
+def _series_optional_value(result: object, name: str, index: int) -> float | None:
+    values = getattr(result, name, [])
+    try:
+        value = values[index]
+    except (TypeError, IndexError):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric != numeric:
+        return None
+    return numeric
+
+
+def _proxy_beta_norm(capital_value: float | None, price_basis: float | None, u_ratio: float | None) -> float | None:
+    if capital_value is None or price_basis is None or u_ratio is None:
+        return None
+    if abs(price_basis) <= 1e-12 or abs(u_ratio) <= 1e-12:
+        return None
+    return (capital_value / price_basis) / u_ratio
+
+
+def _proxy_m_eff(beta_norm: float | None, beta_norm_floor: float) -> tuple[float | None, bool]:
+    if beta_norm is None:
+        return None, False
+    clipped = abs(beta_norm) <= beta_norm_floor
+    return 1.0 / max(abs(beta_norm), beta_norm_floor), clipped
+
+
+def _format_optional_float(value: float | None) -> str:
+    if value is None:
+        return ""
+    return str(_round6(value))
+
+
+def _window_diag_proxy_metrics(result: object, window_id: int, beta_norm_floor: float) -> dict[str, object]:
+    price_basis = _series_optional_value(result, "price_basis", window_id)
+    metrics: dict[str, object] = {
+        "beta_norm_unit": "",
+        "m_eff_source_type": "unavailable",
+        "m_eff_clipped_flag": "false",
+    }
+    components = {
+        "ch": (
+            _series_optional_value(result, "capital_ch", window_id),
+            _series_optional_value(result, "u_ch_amount_ratio", window_id),
+        ),
+        "q": (
+            _series_optional_value(result, "capital_q", window_id),
+            _series_optional_value(result, "u_q_amount_ratio", window_id),
+        ),
+        "retail": (
+            _series_optional_value(result, "capital_retail", window_id),
+            _series_optional_value(result, "u_retail_amount_ratio", window_id),
+        ),
+        "mix": (
+            _series_optional_value(result, "capital_mix", window_id),
+            _series_optional_value(result, "u_mix_amount_ratio", window_id),
+        ),
+    }
+    any_valid = False
+    any_clipped = False
+    for name, (capital_value, u_ratio) in components.items():
+        beta_norm = _proxy_beta_norm(capital_value, price_basis, u_ratio)
+        m_eff, clipped = _proxy_m_eff(beta_norm, beta_norm_floor)
+        metrics[f"beta_norm_{name}_diag"] = _format_optional_float(beta_norm)
+        metrics[f"m_eff_{name}_diag"] = _format_optional_float(m_eff)
+        any_valid = any_valid or beta_norm is not None
+        any_clipped = any_clipped or clipped
+    if any_valid:
+        metrics["beta_norm_unit"] = "amount_response"
+        metrics["m_eff_source_type"] = "amount_ratio_proxy"
+    if any_clipped:
+        metrics["m_eff_clipped_flag"] = "true"
+    return metrics
+
+
+def _daily_diag_proxy_summary(result: object, beta_norm_floor: float) -> tuple[str, str, str]:
+    row_count = _series_len(
+        result,
+        ["price_basis", "u_ch_amount_ratio", "u_q_amount_ratio", "u_retail_amount_ratio", "u_mix_amount_ratio"],
+    )
+    any_valid = False
+    any_clipped = False
+    for window_id in range(row_count):
+        metrics = _window_diag_proxy_metrics(result, window_id, beta_norm_floor)
+        if metrics["m_eff_source_type"] != "unavailable":
+            any_valid = True
+        if metrics["m_eff_clipped_flag"] == "true":
+            any_clipped = True
+    return (
+        "amount_response" if any_valid else "",
+        "amount_ratio_proxy" if any_valid else "unavailable",
+        "true" if any_clipped else "false",
+    )
 
 
 def _submission_date(default_date: str, submit_date_override: str | None = None) -> str:
@@ -611,7 +751,7 @@ def export_pid_window_contrib(pid_results: list[object], output_path: str | Path
                 capital_ch = _series_value(result, "capital_ch", window_id)
                 capital_q = _series_value(result, "capital_q", window_id)
                 capital_retail = _series_value(result, "capital_retail", window_id)
-                capital_mix = c_p - capital_ch
+                capital_mix = _series_value(result, "capital_mix", window_id, c_p - capital_ch)
                 writer.writerow(
                     [
                         getattr(result, "stock_code", ""),
@@ -641,7 +781,9 @@ def export_pid_window_diag(pid_results: list[object], output_path: str | Path, c
     u_source_type = str(cfg.get("u_source_type", "mv_ratio"))
     estimator_method = str(cfg.get("estimator_method", "kalman_filter_realtime"))
     m_slow_method = str(cfg.get("m_slow_method", "ewma_realtime"))
+    beta_norm_floor = float(cfg.get("beta_norm_floor", 1.0e-6))
     data_leakage_check = "pass"
+    m_eff_uncertainty_flag, m_eff_rank_eligible = _resolve_m_eff_status(cfg)
     if "offline" in estimator_method or "offline" in m_slow_method:
         data_leakage_check = "fail"
 
@@ -668,6 +810,8 @@ def export_pid_window_diag(pid_results: list[object], output_path: str | Path, c
                 capital_ch = _series_value(result, "capital_ch", window_id)
                 capital_q = _series_value(result, "capital_q", window_id)
                 capital_retail = _series_value(result, "capital_retail", window_id)
+                capital_mix = _series_value(result, "capital_mix", window_id, c_p - capital_ch)
+                proxy_metrics = _window_diag_proxy_metrics(result, window_id, beta_norm_floor)
                 writer.writerow(
                     [
                         getattr(result, "transaction_date", ""),
@@ -690,15 +834,26 @@ def export_pid_window_diag(pid_results: list[object], output_path: str | Path, c
                         _round6(capital_ch),
                         _round6(capital_q),
                         _round6(capital_retail),
-                        _round6(c_p - capital_ch),
+                        _round6(capital_mix),
+                        proxy_metrics["beta_norm_ch_diag"],
+                        proxy_metrics["beta_norm_q_diag"],
+                        proxy_metrics["beta_norm_retail_diag"],
+                        proxy_metrics["beta_norm_mix_diag"],
+                        proxy_metrics["m_eff_ch_diag"],
+                        proxy_metrics["m_eff_q_diag"],
+                        proxy_metrics["m_eff_retail_diag"],
+                        proxy_metrics["m_eff_mix_diag"],
+                        proxy_metrics["beta_norm_unit"],
+                        proxy_metrics["m_eff_source_type"],
+                        proxy_metrics["m_eff_clipped_flag"],
                         f"{float(getattr(result, 'pid_closure_error', getattr(result, 'closure_error', 0.0))):.2e}",
                         _round6(eps),
                         param_stability_flag,
-                        "true",
+                        m_eff_rank_eligible,
                         data_leakage_check,
                         m_slow_method,
                         "false",
-                        "true",
+                        m_eff_rank_eligible,
                         "true",
                         warnings,
                     ]
@@ -712,8 +867,10 @@ def export_pid_daily_diag(pid_results: list[object], output_path: str | Path, co
     mode_switch = cfg.get("mode_switch", {}) if isinstance(cfg.get("mode_switch", {}), dict) else {}
     estimator_method = str(cfg.get("estimator_method", "kalman_filter_realtime"))
     m_slow_method = str(cfg.get("m_slow_method", "ewma_realtime"))
+    beta_norm_floor = float(cfg.get("beta_norm_floor", 1.0e-6))
     offline_smooth_used = "offline" in estimator_method or "offline" in m_slow_method
     data_leakage_check = "fail" if offline_smooth_used else "pass"
+    m_eff_uncertainty_flag, m_eff_rank_eligible = _resolve_m_eff_status(cfg)
 
     with path.open("w", encoding="utf-8-sig", newline="") as fh:
         writer = csv.writer(fh)
@@ -721,9 +878,8 @@ def export_pid_daily_diag(pid_results: list[object], output_path: str | Path, co
         for result in sorted(pid_results, key=lambda item: (getattr(item, "stock_code", ""), getattr(item, "transaction_date", ""))):
             warnings = list(getattr(result, "warnings", []))
             param_stability_flag = "pass" if bool(getattr(result, "kf_converged", False)) and float(getattr(result, "pid_closure_error", 0.0)) <= 1e-7 else "warn"
-            m_eff_uncertainty_flag = "false"
-            m_eff_rank_eligible = "true"
             submission_ready = "true" if data_leakage_check == "pass" else "false"
+            beta_norm_unit, m_eff_source_type, m_eff_clipped_flag = _daily_diag_proxy_summary(result, beta_norm_floor)
             writer.writerow(
                 [
                     getattr(result, "transaction_date", ""),
@@ -744,14 +900,104 @@ def export_pid_daily_diag(pid_results: list[object], output_path: str | Path, co
                     "pass",
                     str(offline_smooth_used).lower(),
                     param_stability_flag,
+                    beta_norm_unit,
+                    m_eff_source_type,
+                    m_eff_clipped_flag,
                     m_eff_uncertainty_flag,
                     m_eff_rank_eligible,
                     submission_ready,
+                    "raw",
+                    "ok",
                     cfg.get("code_build_hash", ""),
                     len(warnings),
                     " | ".join(warnings),
                 ]
             )
+
+
+def export_pid_daily_diag_records(
+    records: list[dict[str, object]],
+    output_path: str | Path,
+    config: dict | None = None,
+) -> None:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cfg = config or {}
+    mode_switch = cfg.get("mode_switch", {}) if isinstance(cfg.get("mode_switch", {}), dict) else {}
+    default_row = {
+        "q_type": cfg.get("q_type", "window_index"),
+        "u_source_type": cfg.get("u_source_type", "mv_ratio"),
+        "estimator_method": cfg.get("estimator_method", "kalman_filter_realtime"),
+        "m_slow_method": cfg.get("m_slow_method", "ewma_realtime"),
+        "lookback_days": cfg.get("lookback_days", 20),
+        "zero_trade_policy": cfg.get("zero_trade_policy", "mark_only"),
+        "submission_requires_complete_windows": str(bool(cfg.get("submission_requires_complete_windows", True))).lower(),
+        "lambda_switch": mode_switch.get("lambda_switch", 0.1),
+        "lambda_jump": mode_switch.get("lambda_jump", 1.0),
+        "lambda_error": mode_switch.get("lambda_error", 10.0),
+        "feature_engineering_leakage_check": "pass",
+        "rule_layer_leakage_check": "pass",
+        "offline_smooth_used": "false",
+        "beta_norm_unit": "",
+        "m_eff_source_type": "unavailable",
+        "m_eff_clipped_flag": "false",
+        "m_eff_uncertainty_flag": _resolve_m_eff_status(cfg)[0],
+        "m_eff_rank_eligible": _resolve_m_eff_status(cfg)[1],
+        "code_build_hash": cfg.get("code_build_hash", ""),
+    }
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(PID_DAILY_DIAG_COLUMNS)
+        for record in records:
+            raw_warnings = record.get("warnings", []) or []
+            if isinstance(raw_warnings, str):
+                warnings = [raw_warnings] if raw_warnings else []
+            else:
+                warnings = list(raw_warnings)
+            row = {**default_row, **record}
+            writer.writerow(
+                [
+                    row.get("trade_date", ""),
+                    row.get("symbol", ""),
+                    row.get("mode_name", ""),
+                    row.get("q_type", ""),
+                    row.get("u_source_type", ""),
+                    row.get("estimator_method", ""),
+                    row.get("m_slow_method", ""),
+                    row.get("lookback_days", ""),
+                    row.get("zero_trade_policy", ""),
+                    row.get("submission_requires_complete_windows", ""),
+                    row.get("lambda_switch", ""),
+                    row.get("lambda_jump", ""),
+                    row.get("lambda_error", ""),
+                    row.get("data_leakage_check", "pass"),
+                    row.get("feature_engineering_leakage_check", "pass"),
+                    row.get("rule_layer_leakage_check", "pass"),
+                    row.get("offline_smooth_used", "false"),
+                    row.get("param_stability_flag", "pass"),
+                    row.get("beta_norm_unit", default_row["beta_norm_unit"]),
+                    row.get("m_eff_source_type", default_row["m_eff_source_type"]),
+                    row.get("m_eff_clipped_flag", default_row["m_eff_clipped_flag"]),
+                    row.get("m_eff_uncertainty_flag", default_row["m_eff_uncertainty_flag"]),
+                    row.get("m_eff_rank_eligible", default_row["m_eff_rank_eligible"]),
+                    row.get("submission_ready", "true"),
+                    row.get("sample_origin", "raw"),
+                    row.get("reason_code", "ok"),
+                    row.get("code_build_hash", ""),
+                    row.get("warning_count", len(warnings)),
+                    " | ".join(str(item) for item in warnings),
+                ]
+            )
+
+
+def export_raw_data_quality_report(rows: list[dict[str, object]], output_path: str | Path) -> None:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=RAW_DATA_QUALITY_COLUMNS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in RAW_DATA_QUALITY_COLUMNS})
 
 
 def export_window_flow_rows(samples: list[DailySample], output_path: str | Path) -> None:

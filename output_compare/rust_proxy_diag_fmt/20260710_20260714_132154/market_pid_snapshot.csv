@@ -1,0 +1,2 @@
+trade_date,up_count,down_count,breadth_ratio,breadth_balance,p_mean,p_median,p_std,i_mean,i_median,i_std,d_mean,d_median,d_std,market_regime
+20260710,59,34,1.735294,0.268817,0.000063,-0.000493,0.005002,0.000035,-0.000005,0.001996,0.000715,0.000271,0.001399,震荡中性

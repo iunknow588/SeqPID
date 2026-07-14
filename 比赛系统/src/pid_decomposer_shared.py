@@ -32,8 +32,18 @@ class DecompositionResult:
     c_d: np.ndarray = field(default_factory=lambda: np.zeros(48))
     eps: np.ndarray = field(default_factory=lambda: np.zeros(48))
     capital_ch: np.ndarray = field(default_factory=lambda: np.zeros(48))
+    capital_mix: np.ndarray = field(default_factory=lambda: np.zeros(48))
     capital_q: np.ndarray = field(default_factory=lambda: np.zeros(48))
     capital_retail: np.ndarray = field(default_factory=lambda: np.zeros(48))
+    price_basis: np.ndarray = field(default_factory=lambda: np.zeros(48))
+    u_ch_amount_ratio: np.ndarray = field(default_factory=lambda: np.zeros(48))
+    u_q_amount_ratio: np.ndarray = field(default_factory=lambda: np.zeros(48))
+    u_retail_amount_ratio: np.ndarray = field(default_factory=lambda: np.zeros(48))
+    u_mix_amount_ratio: np.ndarray = field(default_factory=lambda: np.zeros(48))
+    u_ch_mv_ratio: np.ndarray = field(default_factory=lambda: np.zeros(48))
+    u_q_mv_ratio: np.ndarray = field(default_factory=lambda: np.zeros(48))
+    u_retail_mv_ratio: np.ndarray = field(default_factory=lambda: np.zeros(48))
+    u_mix_mv_ratio: np.ndarray = field(default_factory=lambda: np.zeros(48))
     capital_anchor_error: np.ndarray = field(default_factory=lambda: np.full(48, np.nan))
     delta_ch: np.ndarray = field(default_factory=lambda: np.zeros(48))
     delta_q: np.ndarray = field(default_factory=lambda: np.zeros(48))
@@ -65,6 +75,9 @@ class DecompositionResult:
     display_fields_used_for_dominant: bool = False
     kf_converged: bool = False
     mode: str = "baseline_4d"
+    u_basis_effective: str = "amount"
+    mv_ratio_input_requested: bool = False
+    mv_ratio_input_applied: bool = False
     warnings: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -150,6 +163,18 @@ class BasePIDDecomposer:
         mix_qr: np.ndarray,
         u_q: np.ndarray | None = None,
         u_retail: np.ndarray | None = None,
+        price_basis: np.ndarray | None = None,
+        u_ch_amount_ratio: np.ndarray | None = None,
+        u_q_amount_ratio: np.ndarray | None = None,
+        u_retail_amount_ratio: np.ndarray | None = None,
+        u_mix_amount_ratio: np.ndarray | None = None,
+        u_ch_mv_ratio: np.ndarray | None = None,
+        u_q_mv_ratio: np.ndarray | None = None,
+        u_retail_mv_ratio: np.ndarray | None = None,
+        u_mix_mv_ratio: np.ndarray | None = None,
+        u_basis_effective: str = "amount",
+        mv_ratio_input_requested: bool = False,
+        mv_ratio_input_applied: bool = False,
     ) -> DecompositionResult:
         t_len = len(delta_p)
         u_ch_norm = self._adaptive_normalize(u_ch)
@@ -165,6 +190,7 @@ class BasePIDDecomposer:
         c_d = np.zeros(t_len)
         eps_smooth = np.zeros(t_len)
         capital_ch = np.zeros(t_len)
+        capital_mix = np.zeros(t_len)
         capital_q = np.zeros(t_len)
         capital_retail = np.zeros(t_len)
         anchor_error = np.full(t_len, np.nan)
@@ -184,7 +210,7 @@ class BasePIDDecomposer:
             u_q_prev = u_q_norm[t - 1] if t > 0 else 0.0
             u_retail_prev = u_retail_norm[t - 1] if t > 0 else 0.0
 
-            c_p[t], capital_q[t], capital_retail[t] = self._compute_external_terms(
+            c_p[t], capital_mix[t], capital_q[t], capital_retail[t] = self._compute_external_terms(
                 t=t,
                 beta_ch=beta_ch,
                 beta_mix=beta_mix,
@@ -202,7 +228,7 @@ class BasePIDDecomposer:
 
             if np.isfinite(ch_anchor[t]) and np.isfinite(mix_qr[t]):
                 rule_total = abs(ch_anchor[t]) + abs(mix_qr[t])
-                model_total = abs(capital_ch[t]) + abs(capital_q[t]) + abs(capital_retail[t])
+                model_total = abs(capital_ch[t]) + abs(capital_mix[t])
                 if rule_total > self.eps and model_total > self.eps:
                     rule_share = abs(ch_anchor[t]) / rule_total
                     model_share = abs(capital_ch[t]) / model_total
@@ -214,11 +240,21 @@ class BasePIDDecomposer:
                 w_q = abs(u_q_prev) / flow_abs_sum
                 w_retail = abs(u_retail_prev) / flow_abs_sum
             else:
-                external_abs_sum = abs(capital_ch[t]) + abs(capital_q[t]) + abs(capital_retail[t])
+                external_abs_sum = abs(capital_ch[t]) + abs(capital_mix[t])
                 if external_abs_sum > self.eps:
                     w_ch = abs(capital_ch[t]) / external_abs_sum
-                    w_q = abs(capital_q[t]) / external_abs_sum
-                    w_retail = abs(capital_retail[t]) / external_abs_sum
+                    if self.mode_name == "baseline_4d":
+                        mix_weight = abs(capital_mix[t]) / external_abs_sum
+                        qr_abs = abs(u_q_prev) + abs(u_retail_prev)
+                        if qr_abs > self.eps:
+                            w_q = mix_weight * abs(u_q_prev) / qr_abs
+                            w_retail = mix_weight * abs(u_retail_prev) / qr_abs
+                        else:
+                            w_q = mix_weight
+                            w_retail = 0.0
+                    else:
+                        w_q = abs(capital_q[t]) / external_abs_sum
+                        w_retail = abs(capital_retail[t]) / external_abs_sum
                 else:
                     w_ch = w_q = w_retail = 1.0 / 3.0
             w_ch_series[t] = w_ch
@@ -237,7 +273,8 @@ class BasePIDDecomposer:
         alloc_closure_error = self._max_abs(total_alloc - delta_p)
         total_display = delta_ch_display + delta_q_display + delta_retail_display
         closure_error = self._max_abs(total_display - delta_p)
-        capital_cp_identity_error = self._max_abs((capital_ch + capital_q + capital_retail) - c_p)
+        formal_capital_total = capital_ch + (capital_mix if self.mode_name == "baseline_4d" else capital_q + capital_retail)
+        capital_cp_identity_error = self._max_abs(formal_capital_total - c_p)
         noise_ratio = np.abs(eps_smooth) / np.maximum(np.abs(delta_p), self.eps)
         explain_ratio = 1.0 - np.minimum(noise_ratio, 1.0)
         dominant_info = self._determine_dominant(capital_ch, capital_q, capital_retail)
@@ -259,8 +296,18 @@ class BasePIDDecomposer:
             c_d=c_d,
             eps=eps_smooth,
             capital_ch=capital_ch,
+            capital_mix=capital_mix,
             capital_q=capital_q,
             capital_retail=capital_retail,
+            price_basis=np.asarray(np.zeros(t_len) if price_basis is None else price_basis, dtype=float),
+            u_ch_amount_ratio=np.asarray(np.zeros(t_len) if u_ch_amount_ratio is None else u_ch_amount_ratio, dtype=float),
+            u_q_amount_ratio=np.asarray(np.zeros(t_len) if u_q_amount_ratio is None else u_q_amount_ratio, dtype=float),
+            u_retail_amount_ratio=np.asarray(np.zeros(t_len) if u_retail_amount_ratio is None else u_retail_amount_ratio, dtype=float),
+            u_mix_amount_ratio=np.asarray(np.zeros(t_len) if u_mix_amount_ratio is None else u_mix_amount_ratio, dtype=float),
+            u_ch_mv_ratio=np.asarray(np.zeros(t_len) if u_ch_mv_ratio is None else u_ch_mv_ratio, dtype=float),
+            u_q_mv_ratio=np.asarray(np.zeros(t_len) if u_q_mv_ratio is None else u_q_mv_ratio, dtype=float),
+            u_retail_mv_ratio=np.asarray(np.zeros(t_len) if u_retail_mv_ratio is None else u_retail_mv_ratio, dtype=float),
+            u_mix_mv_ratio=np.asarray(np.zeros(t_len) if u_mix_mv_ratio is None else u_mix_mv_ratio, dtype=float),
             capital_anchor_error=anchor_error,
             delta_ch=capital_ch,
             delta_q=capital_q,
@@ -292,7 +339,12 @@ class BasePIDDecomposer:
             display_fields_used_for_dominant=False,
             kf_converged=kf_converged,
             mode=self.mode_name,
+            u_basis_effective=u_basis_effective,
+            mv_ratio_input_requested=mv_ratio_input_requested,
+            mv_ratio_input_applied=mv_ratio_input_applied,
         )
+        if mv_ratio_input_requested and not mv_ratio_input_applied:
+            result.warnings.append("mv_ratio input requested but float-share metadata unavailable; fell back to amount basis")
         if not kf_converged:
             result.warnings.append("KF did not converge")
         if closure_error > 1e-7:
@@ -355,13 +407,26 @@ class BasePIDDecomposer:
         u_q = np.zeros(t_len)
         u_retail = np.zeros(t_len)
         u_mix = np.zeros(t_len)
+        price_basis = np.zeros(t_len)
+        u_ch_amount_ratio = np.zeros(t_len)
+        u_q_amount_ratio = np.zeros(t_len)
+        u_retail_amount_ratio = np.zeros(t_len)
+        u_mix_amount_ratio = np.zeros(t_len)
+        u_ch_mv_ratio = np.zeros(t_len)
+        u_q_mv_ratio = np.zeros(t_len)
+        u_retail_mv_ratio = np.zeros(t_len)
+        u_mix_mv_ratio = np.zeros(t_len)
         ch_anchor = np.zeros(t_len)
         mix_qr = np.zeros(t_len)
+        flow_windows = 0
+        mv_ratio_valid_windows = 0
         for row in rows:
             t = int(float(row.get("window_id", 0) or 0))
             if t < 0 or t >= t_len:
                 continue
             amount = self._to_float_any(row, ["deal_amount", "amount", "鎴愪氦棰?"])
+            close_price = self._to_float_any(row, ["window_close_price", "close_price", "last_price"])
+            float_mv = self._to_float_any(row, ["float_mv"])
             buy = self._to_float_any(row, ["signal_deal_buy_amount", "buy_amount", "涓诲姩涔版垚浜ら"])
             sell = self._to_float_any(row, ["signal_deal_sell_amount", "sell_amount", "涓诲姩鍗栨垚浜ら"])
             impact = self._to_float_any(row, ["pi_max_price_impact_pct", "price_impact", "浠锋牸鍐插嚮"])
@@ -393,14 +458,49 @@ class BasePIDDecomposer:
             delta_p[t] = impact if has_explicit_anchor else impact * sign
             u_ch[t] = ch_anchor[t]
             u_mix[t] = mix_qr[t] * (1.0 + min(cancel, 1.0))
+            price_basis[t] = close_price
+            if abs(ch_anchor[t]) > self.eps or abs(mix_qr[t]) > self.eps or abs(u_retail[t]) > self.eps:
+                flow_windows += 1
+            if abs(amount) > self.eps:
+                u_ch_amount_ratio[t] = ch_anchor[t] / amount
+                u_q_amount_ratio[t] = u_q[t] / amount
+                u_retail_amount_ratio[t] = u_retail[t] / amount
+                u_mix_amount_ratio[t] = mix_qr[t] / amount
+            if abs(float_mv) > self.eps:
+                u_ch_mv_ratio[t] = ch_anchor[t] / float_mv
+                u_q_mv_ratio[t] = u_q[t] / float_mv
+                u_retail_mv_ratio[t] = u_retail[t] / float_mv
+                u_mix_mv_ratio[t] = mix_qr[t] / float_mv
+                if abs(ch_anchor[t]) > self.eps or abs(mix_qr[t]) > self.eps or abs(u_retail[t]) > self.eps:
+                    mv_ratio_valid_windows += 1
+        mv_ratio_input_requested = str(self.config.get("u_source_type", "") or "").strip() == "mv_ratio"
+        mv_ratio_input_applied = mv_ratio_input_requested and flow_windows > 0 and mv_ratio_valid_windows >= flow_windows
+        effective_u_ch = u_ch_mv_ratio if mv_ratio_input_applied else u_ch
+        effective_u_q = u_q_mv_ratio if mv_ratio_input_applied else u_q
+        effective_u_retail = u_retail_mv_ratio if mv_ratio_input_applied else u_retail
+        effective_u_mix = u_mix_mv_ratio if mv_ratio_input_applied else u_mix
+        effective_ch_anchor = u_ch_mv_ratio if mv_ratio_input_applied else ch_anchor
+        effective_mix_qr = u_mix_mv_ratio if mv_ratio_input_applied else mix_qr
         return {
             "delta_p": delta_p,
-            "u_ch": u_ch,
-            "u_q": u_q,
-            "u_retail": u_retail,
-            "u_mix": u_mix,
-            "ch_anchor": self._adaptive_normalize(ch_anchor),
-            "mix_qr": self._adaptive_normalize(mix_qr),
+            "u_ch": effective_u_ch,
+            "u_q": effective_u_q,
+            "u_retail": effective_u_retail,
+            "u_mix": effective_u_mix,
+            "price_basis": price_basis,
+            "u_ch_amount_ratio": u_ch_amount_ratio,
+            "u_q_amount_ratio": u_q_amount_ratio,
+            "u_retail_amount_ratio": u_retail_amount_ratio,
+            "u_mix_amount_ratio": u_mix_amount_ratio,
+            "u_ch_mv_ratio": u_ch_mv_ratio,
+            "u_q_mv_ratio": u_q_mv_ratio,
+            "u_retail_mv_ratio": u_retail_mv_ratio,
+            "u_mix_mv_ratio": u_mix_mv_ratio,
+            "ch_anchor": self._adaptive_normalize(effective_ch_anchor),
+            "mix_qr": self._adaptive_normalize(effective_mix_qr),
+            "u_basis_effective": "mv_ratio" if mv_ratio_input_applied else "amount",
+            "mv_ratio_input_requested": mv_ratio_input_requested,
+            "mv_ratio_input_applied": mv_ratio_input_applied,
         }
 
     def _extract_from_summary(self, summary: dict) -> dict[str, np.ndarray]:
@@ -410,6 +510,15 @@ class BasePIDDecomposer:
         u_q = np.zeros(t_len)
         u_retail = np.zeros(t_len)
         u_mix = np.zeros(t_len)
+        price_basis = np.zeros(t_len)
+        u_ch_amount_ratio = np.zeros(t_len)
+        u_q_amount_ratio = np.zeros(t_len)
+        u_retail_amount_ratio = np.zeros(t_len)
+        u_mix_amount_ratio = np.zeros(t_len)
+        u_ch_mv_ratio = np.zeros(t_len)
+        u_q_mv_ratio = np.zeros(t_len)
+        u_retail_mv_ratio = np.zeros(t_len)
+        u_mix_mv_ratio = np.zeros(t_len)
         ch_anchor = np.zeros(t_len)
         mix_qr = np.zeros(t_len)
         net_direction = float(summary.get("net_direction", 0.0) or 0.0)
@@ -438,14 +547,35 @@ class BasePIDDecomposer:
             "u_q": u_q,
             "u_retail": u_retail,
             "u_mix": u_mix,
+            "price_basis": price_basis,
+            "u_ch_amount_ratio": u_ch_amount_ratio,
+            "u_q_amount_ratio": u_q_amount_ratio,
+            "u_retail_amount_ratio": u_retail_amount_ratio,
+            "u_mix_amount_ratio": u_mix_amount_ratio,
+            "u_ch_mv_ratio": u_ch_mv_ratio,
+            "u_q_mv_ratio": u_q_mv_ratio,
+            "u_retail_mv_ratio": u_retail_mv_ratio,
+            "u_mix_mv_ratio": u_mix_mv_ratio,
             "ch_anchor": self._adaptive_normalize(ch_anchor),
             "mix_qr": self._adaptive_normalize(mix_qr),
+            "u_basis_effective": "amount",
+            "mv_ratio_input_requested": str(self.config.get("u_source_type", "") or "").strip() == "mv_ratio",
+            "mv_ratio_input_applied": False,
         }
 
     def _extract_from_level2_window(self, level2_window) -> dict[str, np.ndarray]:
         trades = list(getattr(level2_window, "trades", []) or [])
         windows = list(getattr(level2_window, "windows", []) or range(48))
         t_len = len(windows) if windows else 48
+        price_basis = np.zeros(t_len)
+        u_ch_amount_ratio = np.zeros(t_len)
+        u_q_amount_ratio = np.zeros(t_len)
+        u_retail_amount_ratio = np.zeros(t_len)
+        u_mix_amount_ratio = np.zeros(t_len)
+        u_ch_mv_ratio = np.zeros(t_len)
+        u_q_mv_ratio = np.zeros(t_len)
+        u_retail_mv_ratio = np.zeros(t_len)
+        u_mix_mv_ratio = np.zeros(t_len)
         u_ch = np.zeros(t_len)
         u_q = np.zeros(t_len)
         u_retail = np.zeros(t_len)
@@ -475,8 +605,20 @@ class BasePIDDecomposer:
             "u_q": u_q,
             "u_retail": u_retail,
             "u_mix": u_mix,
+            "price_basis": price_basis,
+            "u_ch_amount_ratio": u_ch_amount_ratio,
+            "u_q_amount_ratio": u_q_amount_ratio,
+            "u_retail_amount_ratio": u_retail_amount_ratio,
+            "u_mix_amount_ratio": u_mix_amount_ratio,
+            "u_ch_mv_ratio": u_ch_mv_ratio,
+            "u_q_mv_ratio": u_q_mv_ratio,
+            "u_retail_mv_ratio": u_retail_mv_ratio,
+            "u_mix_mv_ratio": u_mix_mv_ratio,
             "ch_anchor": self._adaptive_normalize(ch_anchor),
             "mix_qr": self._adaptive_normalize(mix_qr),
+            "u_basis_effective": "amount",
+            "mv_ratio_input_requested": str(self.config.get("u_source_type", "") or "").strip() == "mv_ratio",
+            "mv_ratio_input_applied": False,
         }
 
     def _rts_backward_smooth(self, psi_filtered: np.ndarray, cov_filtered: np.ndarray) -> np.ndarray:
@@ -535,11 +677,26 @@ class BasePIDDecomposer:
             "retail": capital_retail[-1] if t_len else 0.0,
         }
         dominant_value = tail_values[dominant_key]
+        dominant_type = {"hot_money": "游资", "quant": "量化", "retail": "散户"}.get(dominant_key, "unknown")
+        if self.mode_name == "baseline_4d":
+            hot_ratio = ratios["hot_money"]
+            hot_threshold = float(
+                self.pid_config.get(
+                    "baseline_4d_hot_money_dominant_threshold",
+                    self.pid_config.get("capital_structural_strong_ratio", 0.46),
+                )
+            )
+            if hot_ratio >= hot_threshold and hot_ratio >= max(ratios["quant"], ratios["retail"]):
+                dominant_type = "游资"
+                dominant_value = tail_values["hot_money"]
+            else:
+                dominant_type = "unknown"
+                dominant_value = (capital_ch[-1] + capital_q[-1] + capital_retail[-1]) if t_len else 0.0
         return {
             "hot_money_ratio": ratios["hot_money"],
             "quant_ratio": ratios["quant"],
             "retail_ratio": ratios["retail"],
-            "dominant_type": {"hot_money": "游资", "quant": "量化", "retail": "散户"}.get(dominant_key, "unknown"),
+            "dominant_type": dominant_type,
             "dominant_intention": "买入" if dominant_value > 0 else "卖出" if dominant_value < 0 else "中性",
             "window_dominant": labels,
             "window_intentions": intentions,
@@ -587,5 +744,5 @@ class BasePIDDecomposer:
         u_mix_prev: float,
         u_q_prev: float,
         u_retail_prev: float,
-    ) -> tuple[float, float, float]:
+    ) -> tuple[float, float, float, float]:
         raise NotImplementedError

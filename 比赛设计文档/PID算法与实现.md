@@ -204,7 +204,7 @@ feature_cutoff_timestamp
 
 ---
 
-## 4. PID 主状态方程
+## 4. PID 观测与状态空间主方程
 
 系统采用交易时间 `q` 轴上的价格状态与价格速度二层方程。为保持量纲清晰，先定义：
 
@@ -267,7 +267,7 @@ y_hat_t+1|t = x_t+1|t · psi_t|t-1
 v_hat_q,t+1|t = y_hat_t+1|t / Delta q_t+1
 ```
 
-其中 `y_t` 是已观测的价格差分，`y_hat_t+1|t` 是模型预测值，二者不能使用同一字段覆盖。主状态方程是观测方程的展开式，不是第三种独立的计算流程。
+其中 `y_t` 是已观测的价格差分，`y_hat_t+1|t` 是模型预测值，二者不能使用同一字段覆盖。价格差分递推式只是对观测量与贡献拆解的重写，用于闭合校验和价格路径恢复，不构成需要单独估计的第三类状态转移。
 
 其中：
 
@@ -482,7 +482,7 @@ Delta_q P_t = x_t^(4) · psi_t^(4) + epsilon_t
 - `capital_mix`
 - `c_p / c_i / c_d / eps`
 
-若需要展示 `capital_q / capital_retail`，只能按 `Q_rule` 与 `R_seed` 在 `U_mix` 中的绝对权重做诊断分摊。分摊使用的时间索引应与 `capital_mix,t = beta_mix,t * U_mix,t-1` 保持一致。
+若需要展示 `capital_q / capital_retail`，只能按 `Q_rule` 与 `R_seed` 在 `U_mix` 中的绝对权重做诊断分摊。分摊使用的时间索引应与 `capital_mix,t = beta_mix,t * U_mix,t-1` 保持一致，且必须标记为**诊断近似**，不得回写为 `baseline_4d` 的正式结构化输出，也不得参与 `capital_type` 主判断。
 
 符号冲突规则：
 
@@ -702,7 +702,16 @@ abs(r_1) < 1
 abs(r_2) < 1
 ```
 
-等价的二阶 Jury 条件为：
+对二阶特征多项式 `z^2 - phi * z + theta = 0`，Jury 判据的完整冻结窗口检查可写为：
+
+```text
+abs(a0) < 1
+1 + a1 + a0 > 0
+1 - a1 + a0 > 0
+1 - a0 > 0
+```
+
+代入当前模型的 `a1 = -phi`、`a0 = theta` 后，等价的二阶 Jury 条件为：
 
 ```text
 abs(theta) < 1
@@ -1351,6 +1360,24 @@ submission_ready
 
 ## 12. 最终口径
 
+## 11.1 2026-07-14 诊断交付补充
+
+PID 交付层新增两条约束：
+
+1. `raw_data_quality_report.csv` 必须先于 PID 诊断形成，用于说明原始样本是否具备进入常规 PID 的资格。
+2. `pid_daily_diag.csv` 必须覆盖补全样本，但补全样本不得伪装为常规结构化 PID 输出。
+
+补全样本固定诊断约束：
+
+- `mode_name = imputed_market_median`
+- `sample_origin = imputed`
+- `reason_code = missing_raw_data_imputed`
+- `data_leakage_check = pass`
+- `m_eff_rank_eligible = false`
+- `submission_ready = true`
+
+对于 `missing_raw_file / empty_raw_file / null_filled_raw_file / invalid_raw_schema / no_effective_rows`，不得生成常规 `pid_window_diag.csv` 行，不得进入常规 PID 有效样本计数，也不得参与市场 PID 正式聚合。
+
 PID 层的职责是：
 
 ```text
@@ -1383,3 +1410,49 @@ capital_* -> beta_norm_* -> m_eff_* -> m_eff_slow / m_eff_fast
 ```
 
 `phi / theta` 只解释市场系统响应，`beta_*` 解释行为代理流对价格变化的加载强度，所有参数首先是状态变量，再经过跨日统计后才可进入个股画像或稳定量检验。
+
+## 11.2 2026-07-14 Implementation Status Update
+
+Current code status is now:
+
+1. formal `mv_ratio`-based `beta_norm / m_eff` is still not implemented
+2. Python and Rust both implement a diagnostic-only proxy path
+3. the proxy path is exported only to `pid_window_diag.csv` and `pid_daily_diag.csv`
+
+Current proxy output contract:
+
+- `beta_norm_unit = amount_response`
+- `m_eff_source_type = amount_ratio_proxy`
+- `m_eff_rank_eligible = false`
+
+Current proxy source basis:
+
+- `capital_*`
+- `price_basis`
+- `u_*_amount_ratio`
+
+This means the current implementation is valid for:
+
+1. single-symbol diagnosis
+2. cross-engine replay comparison
+3. engineering validation of response continuity
+
+It is not valid for:
+
+1. formal cross-symbol `m_eff` ranking
+2. stable market-wide portrait labels
+3. any claim that true `U_*_mv_ratio` has already been reconstructed
+
+Replay evidence:
+
+- Python default-config 100-stock replay:
+  - `output_compare/python_proxy_diag/20260710_20260714_125357`
+- Rust default-config 100-stock replay:
+  - `output_compare/rust_proxy_diag_fmt2/20260710_20260714_132813`
+
+The latest replay confirms:
+
+- official outputs stay aligned
+- daily proxy metadata is aligned
+- window proxy values are aligned in business meaning
+- remaining differences are limited to tiny float-rounding tails

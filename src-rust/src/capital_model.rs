@@ -88,8 +88,16 @@ fn select_capital_type(
     let mut selected_label = structural_label.clone();
     let mut selected_confidence = structural_ratio;
     let mut source = "capital_external_force".to_string();
+    let structural_is_formal = matches!(structural_label.as_str(), "游资" | "量化" | "散户");
 
-    if config
+    if !structural_is_formal && !rule.label.is_empty() {
+        selected_label = rule.label.clone();
+        selected_confidence = rule.confidence;
+        source = "rule_flow_required_for_mixed_pool".to_string();
+    }
+
+    if structural_is_formal
+        && config
         .get("enable_rule_flow_capital_override")
         .and_then(|v| v.as_bool())
         .unwrap_or(true)
@@ -143,6 +151,10 @@ fn select_capital_type(
     debug.insert(
         "external_force_capital_ratio".into(),
         serde_json::json!(round4(structural_ratio)),
+    );
+    debug.insert(
+        "external_force_is_formal_type".into(),
+        serde_json::Value::Bool(structural_is_formal),
     );
     debug.insert(
         "structural_capital_type".into(),
@@ -411,6 +423,13 @@ pub fn predict_capitals(
             serde_json::json!(round4(state_tail.capital_ch_rule_approx)),
         );
         debug_info.insert(
+            "state_feature_capital_mix".into(),
+            state_tail
+                .capital_mix
+                .map(|value| serde_json::json!(round4(value)))
+                .unwrap_or(serde_json::Value::Null),
+        );
+        debug_info.insert(
             "state_feature_capital_q_rule_approx".into(),
             serde_json::json!(round4(state_tail.capital_q_rule_approx)),
         );
@@ -468,4 +487,65 @@ struct RuleFlowEvidence {
 
 fn parse_row_f64(row: &HashMap<String, String>, names: &[&str]) -> Option<f64> {
     names.iter().find_map(|name| row.get(*name)).and_then(|value| value.parse::<f64>().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mixed_pool_requires_rule_flow_for_non_hot_label() {
+        let sample = DailySample {
+            stock_code: "000001.SZ".to_string(),
+            transaction_date: "20260710".to_string(),
+            rows: vec![
+                HashMap::from([
+                    ("window_id".to_string(), "1".to_string()),
+                    ("CH_rule_t".to_string(), "10000".to_string()),
+                    ("Q_rule_t".to_string(), "90000".to_string()),
+                    ("R_seed_t".to_string(), "20000".to_string()),
+                ]),
+                HashMap::from([
+                    ("window_id".to_string(), "2".to_string()),
+                    ("CH_rule_t".to_string(), "-5000".to_string()),
+                    ("Q_rule_t".to_string(), "80000".to_string()),
+                    ("R_seed_t".to_string(), "10000".to_string()),
+                ]),
+            ],
+            feature_summary: HashMap::from([
+                ("raw_order_age_recovered_count".to_string(), 200.0),
+                ("raw_order_age_missing_count".to_string(), 20.0),
+            ]),
+            quality_flags: HashMap::new(),
+        };
+        let pid_result = DecompositionResult {
+            stock_code: sample.stock_code.clone(),
+            transaction_date: sample.transaction_date.clone(),
+            mode: "baseline_4d".to_string(),
+            dominant_type: "unknown".to_string(),
+            dominant_intention: "买入".to_string(),
+            hot_money_ratio: 0.20,
+            quant_ratio: 0.55,
+            retail_ratio: 0.25,
+            ..DecompositionResult::default()
+        };
+
+        let result = predict_capitals(&sample, &HashMap::new(), &HashMap::new(), &pid_result)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+
+        assert_eq!(result.capital_type, "量化");
+        assert_eq!(
+            result.debug_info.get("capital_type_source").and_then(|v| v.as_str()),
+            Some("rule_flow_required_for_mixed_pool")
+        );
+        assert_eq!(
+            result
+                .debug_info
+                .get("external_force_is_formal_type")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
 }

@@ -81,13 +81,16 @@ fn attach_pid_fields(
 
     if is_structural {
         feature.capital_ch = series_value(&pid_result.capital_ch, index);
-        feature.capital_q = series_value(&pid_result.capital_q, index);
-        feature.capital_retail = series_value(&pid_result.capital_retail, index);
-        if let Some(capital_q) = feature.capital_q {
-            feature.rule_error_q = Some(relative_error(feature.q_rule_t, capital_q));
-        }
-        if let Some(capital_retail) = feature.capital_retail {
-            feature.rule_error_retail = Some(relative_error(feature.r_seed_t, capital_retail));
+        feature.capital_mix = series_value(&pid_result.capital_mix, index);
+        if pid_result.mode != "baseline_4d" {
+            feature.capital_q = series_value(&pid_result.capital_q, index);
+            feature.capital_retail = series_value(&pid_result.capital_retail, index);
+            if let Some(capital_q) = feature.capital_q {
+                feature.rule_error_q = Some(relative_error(feature.q_rule_t, capital_q));
+            }
+            if let Some(capital_retail) = feature.capital_retail {
+                feature.rule_error_retail = Some(relative_error(feature.r_seed_t, capital_retail));
+            }
         }
     }
 }
@@ -133,4 +136,153 @@ fn series_value(series: &[f64], index: usize) -> Option<f64> {
 fn relative_error(rule_value: f64, structural_value: f64) -> f64 {
     let denom = rule_value.abs().max(structural_value.abs()).max(1e-8);
     (rule_value - structural_value).abs() / denom
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rule_base_keeps_structural_capital_fields_empty() {
+        let sample = DailySample {
+            stock_code: "000001.SZ".to_string(),
+            transaction_date: "20260710".to_string(),
+            rows: vec![HashMap::from([
+                ("window_id".to_string(), "0".to_string()),
+                ("CH_rule_t".to_string(), "100".to_string()),
+                ("Q_rule_t".to_string(), "50".to_string()),
+                ("R_seed_t".to_string(), "-20".to_string()),
+            ])],
+            feature_summary: HashMap::new(),
+            quality_flags: HashMap::new(),
+        };
+        let pid_result = DecompositionResult {
+            stock_code: sample.stock_code.clone(),
+            transaction_date: sample.transaction_date.clone(),
+            mode: "rule_base".to_string(),
+            ..DecompositionResult::default()
+        };
+
+        let feature = build_state_features(&sample, Some(&pid_result))
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+
+        assert!(!feature.is_structural_output);
+        assert_eq!(feature.capital_ch_rule_approx, 100.0);
+        assert_eq!(feature.capital_q_rule_approx, 50.0);
+        assert_eq!(feature.capital_retail_rule_approx, -20.0);
+        assert_eq!(feature.capital_ch, None);
+        assert_eq!(feature.capital_mix, None);
+        assert_eq!(feature.capital_q, None);
+        assert_eq!(feature.capital_retail, None);
+    }
+
+    #[test]
+    fn baseline_4d_keeps_quant_retail_split_as_diagnostic_only() {
+        let sample = DailySample {
+            stock_code: "000001.SZ".to_string(),
+            transaction_date: "20260710".to_string(),
+            rows: vec![HashMap::from([
+                ("window_id".to_string(), "0".to_string()),
+                ("CH_rule_t".to_string(), "100".to_string()),
+                ("Q_rule_t".to_string(), "50".to_string()),
+                ("R_seed_t".to_string(), "20".to_string()),
+            ])],
+            feature_summary: HashMap::new(),
+            quality_flags: HashMap::new(),
+        };
+        let pid_result = DecompositionResult {
+            stock_code: sample.stock_code.clone(),
+            transaction_date: sample.transaction_date.clone(),
+            mode: "baseline_4d".to_string(),
+            capital_ch: {
+                let mut v = vec![0.0; 48];
+                v[0] = 90.0;
+                v
+            },
+            capital_mix: {
+                let mut v = vec![0.0; 48];
+                v[0] = 35.0;
+                v
+            },
+            capital_q: {
+                let mut v = vec![0.0; 48];
+                v[0] = 25.0;
+                v
+            },
+            capital_retail: {
+                let mut v = vec![0.0; 48];
+                v[0] = 10.0;
+                v
+            },
+            ..DecompositionResult::default()
+        };
+
+        let feature = build_state_features(&sample, Some(&pid_result))
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+
+        assert!(feature.is_structural_output);
+        assert_eq!(feature.capital_ch, Some(90.0));
+        assert_eq!(feature.capital_mix, Some(35.0));
+        assert_eq!(feature.capital_q, None);
+        assert_eq!(feature.capital_retail, None);
+        assert_eq!(feature.rule_error_q, None);
+        assert_eq!(feature.rule_error_retail, None);
+    }
+
+    #[test]
+    fn diag_5d_exposes_rule_errors() {
+        let sample = DailySample {
+            stock_code: "000001.SZ".to_string(),
+            transaction_date: "20260710".to_string(),
+            rows: vec![HashMap::from([
+                ("window_id".to_string(), "0".to_string()),
+                ("CH_rule_t".to_string(), "100".to_string()),
+                ("Q_rule_t".to_string(), "50".to_string()),
+                ("R_seed_t".to_string(), "20".to_string()),
+            ])],
+            feature_summary: HashMap::new(),
+            quality_flags: HashMap::new(),
+        };
+        let pid_result = DecompositionResult {
+            stock_code: sample.stock_code.clone(),
+            transaction_date: sample.transaction_date.clone(),
+            mode: "diag_5d".to_string(),
+            capital_ch: {
+                let mut v = vec![0.0; 48];
+                v[0] = 90.0;
+                v
+            },
+            capital_mix: {
+                let mut v = vec![0.0; 48];
+                v[0] = 35.0;
+                v
+            },
+            capital_q: {
+                let mut v = vec![0.0; 48];
+                v[0] = 25.0;
+                v
+            },
+            capital_retail: {
+                let mut v = vec![0.0; 48];
+                v[0] = 10.0;
+                v
+            },
+            ..DecompositionResult::default()
+        };
+
+        let feature = build_state_features(&sample, Some(&pid_result))
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+
+        assert!(feature.is_structural_output);
+        assert_eq!(feature.capital_q, Some(25.0));
+        assert_eq!(feature.capital_retail, Some(10.0));
+        assert_eq!(feature.rule_error_q, Some(0.5));
+        assert_eq!(feature.rule_error_retail, Some(0.5));
+    }
 }

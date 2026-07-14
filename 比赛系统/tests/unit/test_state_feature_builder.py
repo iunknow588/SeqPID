@@ -51,7 +51,7 @@ class StateFeatureBuilderTest(unittest.TestCase):
         pid_result = DecompositionResult(
             stock_code=sample.stock_code,
             transaction_date=sample.transaction_date,
-            mode="baseline_4d",
+            mode="diag_5d",
             capital_ch=np.array([90.0] + [0.0] * 47),
             capital_q=np.array([25.0] + [0.0] * 47),
             capital_retail=np.array([10.0] + [0.0] * 47),
@@ -63,6 +63,32 @@ class StateFeatureBuilderTest(unittest.TestCase):
         self.assertEqual(feature.capital_ch, 90.0)
         self.assertEqual(feature.rule_error_q, 0.5)
         self.assertEqual(feature.rule_error_retail, 0.5)
+
+    def test_baseline_4d_keeps_quant_retail_split_as_diagnostic_only(self) -> None:
+        sample = DailySample(
+            stock_code="000001.SZ",
+            transaction_date="20260710",
+            rows=[{"window_id": "0", "CH_rule_t": "100", "Q_rule_t": "50", "R_seed_t": "20"}],
+            feature_summary={},
+        )
+        pid_result = DecompositionResult(
+            stock_code=sample.stock_code,
+            transaction_date=sample.transaction_date,
+            mode="baseline_4d",
+            capital_ch=np.array([90.0] + [0.0] * 47),
+            capital_mix=np.array([35.0] + [0.0] * 47),
+            capital_q=np.array([25.0] + [0.0] * 47),
+            capital_retail=np.array([10.0] + [0.0] * 47),
+        )
+
+        feature = build_state_features(sample, pid_result)[0]
+
+        self.assertTrue(feature.is_structural_output)
+        self.assertEqual(feature.capital_mix, 35.0)
+        self.assertIsNone(feature.capital_q)
+        self.assertIsNone(feature.capital_retail)
+        self.assertIsNone(feature.rule_error_q)
+        self.assertIsNone(feature.rule_error_retail)
 
     def test_capital_model_debug_info_includes_state_feature_contract(self) -> None:
         sample = DailySample(
@@ -81,6 +107,7 @@ class StateFeatureBuilderTest(unittest.TestCase):
             quant_ratio=0.2,
             retail_ratio=0.1,
             capital_ch=np.array([0.0] * 47 + [9.0]),
+            capital_mix=np.array([0.0] * 47 + [4.0]),
             capital_q=np.array([0.0] * 47 + [4.0]),
             capital_retail=np.array([0.0] * 48),
         )
@@ -93,6 +120,7 @@ class StateFeatureBuilderTest(unittest.TestCase):
         self.assertFalse(result.debug_info["display_fields_used_for_dominant"])
         self.assertEqual(result.debug_info["CH_rule_tail"], 10.0)
         self.assertEqual(result.debug_info["capital_ch_tail"], 9.0)
+        self.assertEqual(result.debug_info["capital_mix_tail"], 4.0)
 
 
 if __name__ == "__main__":

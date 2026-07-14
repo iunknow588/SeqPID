@@ -1,0 +1,93 @@
+{
+  "total_seconds": 338.866116,
+  "sample_build_seconds": 335.342922,
+  "pattern_seconds": 0.030966,
+  "capital_seconds": 1.247694,
+  "market_seconds": 0.046116,
+  "export_seconds": 1.050493,
+  "processed_samples": 97,
+  "imputed_missing_symbols": 3,
+  "skipped_incomplete_samples": 0,
+  "top_slowest_samples": [
+    {
+      "stock_code": "600176.SH",
+      "sample_build_seconds": 33.228366
+    },
+    {
+      "stock_code": "600172.SH",
+      "sample_build_seconds": 24.683963
+    },
+    {
+      "stock_code": "688008.SH",
+      "sample_build_seconds": 15.975564
+    },
+    {
+      "stock_code": "600150.SH",
+      "sample_build_seconds": 15.900482
+    },
+    {
+      "stock_code": "600276.SH",
+      "sample_build_seconds": 15.817994
+    },
+    {
+      "stock_code": "688126.SH",
+      "sample_build_seconds": 14.211296
+    },
+    {
+      "stock_code": "605358.SH",
+      "sample_build_seconds": 13.150161
+    },
+    {
+      "stock_code": "600549.SH",
+      "sample_build_seconds": 11.402245
+    },
+    {
+      "stock_code": "600030.SH",
+      "sample_build_seconds": 11.348096
+    },
+    {
+      "stock_code": "600110.SH",
+      "sample_build_seconds": 9.580336
+    },
+    {
+      "stock_code": "600186.SH",
+      "sample_build_seconds": 9.500495
+    },
+    {
+      "stock_code": "600552.SH",
+      "sample_build_seconds": 8.769329
+    },
+    {
+      "stock_code": "603893.SH",
+      "sample_build_seconds": 8.235414
+    },
+    {
+      "stock_code": "600226.SH",
+      "sample_build_seconds": 8.072425
+    },
+    {
+      "stock_code": "688521.SH",
+      "sample_build_seconds": 7.815482
+    },
+    {
+      "stock_code": "600309.SH",
+      "sample_build_seconds": 7.673663
+    },
+    {
+      "stock_code": "601211.SH",
+      "sample_build_seconds": 7.427733
+    },
+    {
+      "stock_code": "601636.SH",
+      "sample_build_seconds": 6.739087
+    },
+    {
+      "stock_code": "600353.SH",
+      "sample_build_seconds": 6.33115
+    },
+    {
+      "stock_code": "603011.SH",
+      "sample_build_seconds": 4.883005
+    }
+  ]
+}

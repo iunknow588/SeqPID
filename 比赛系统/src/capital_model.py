@@ -80,17 +80,24 @@ def _rule_flow_evidence(sample: DailySample) -> dict:
 
 def _select_capital_type(sample: DailySample, pid_result: DecompositionResult, config: dict) -> tuple[str, float, dict]:
     structural_label = pid_result.dominant_type
-    structural_ratio = {
+    structural_ratio_map = {
         "游资": pid_result.hot_money_ratio,
         "量化": pid_result.quant_ratio,
         "散户": pid_result.retail_ratio,
-    }.get(structural_label, 0.0)
+    }
+    structural_ratio = structural_ratio_map.get(structural_label, 0.0)
     rule = _rule_flow_evidence(sample)
     selected_label = structural_label
     selected_confidence = structural_ratio
     source = "capital_external_force"
+    structural_is_formal = structural_label in structural_ratio_map
 
-    if bool(config.get("enable_rule_flow_capital_override", True)) and rule["label"]:
+    if not structural_is_formal and rule["label"]:
+        selected_label = rule["label"]
+        selected_confidence = rule["confidence"]
+        source = "rule_flow_required_for_mixed_pool"
+
+    if structural_is_formal and bool(config.get("enable_rule_flow_capital_override", True)) and rule["label"]:
         label_thresholds = {
             "游资": float(config.get("capital_hot_money_rule_override_threshold", 0.46)),
             "散户": float(config.get("capital_retail_rule_override_threshold", 0.46)),
@@ -121,6 +128,7 @@ def _select_capital_type(sample: DailySample, pid_result: DecompositionResult, c
         "capital_type_source": source,
         "external_force_capital_type": structural_label,
         "external_force_capital_ratio": round(structural_ratio, 4),
+        "external_force_is_formal_type": structural_is_formal,
         "structural_capital_type": structural_label,
         "structural_capital_ratio": round(structural_ratio, 4),
         "rule_flow_capital_type": rule["label"] or None,
@@ -230,6 +238,7 @@ def predict_capitals(sample: DailySample, config: dict, label_dict: dict,
             "Q_rule_tail": round(state_tail.Q_rule_t, 4),
             "R_seed_tail": round(state_tail.R_seed_t, 4),
             "capital_ch_tail": round(state_tail.capital_ch, 4) if state_tail.capital_ch is not None else None,
+            "capital_mix_tail": round(state_tail.capital_mix, 4) if state_tail.capital_mix is not None else None,
             "capital_q_tail": round(state_tail.capital_q, 4) if state_tail.capital_q is not None else None,
             "capital_retail_tail": round(state_tail.capital_retail, 4) if state_tail.capital_retail is not None else None,
             "rule_error_q_tail": round(state_tail.rule_error_q, 4) if state_tail.rule_error_q is not None else None,

@@ -66,12 +66,15 @@ def _attach_pid_fields(feature: StateFeature, pid_result: Any, index: int, is_st
 
     if is_structural:
         feature.capital_ch = _series_value(getattr(pid_result, "capital_ch", []), index)
-        feature.capital_q = _series_value(getattr(pid_result, "capital_q", []), index)
-        feature.capital_retail = _series_value(getattr(pid_result, "capital_retail", []), index)
-        if feature.capital_q is not None:
-            feature.rule_error_q = _relative_error(feature.Q_rule_t, feature.capital_q)
-        if feature.capital_retail is not None:
-            feature.rule_error_retail = _relative_error(feature.R_seed_t, feature.capital_retail)
+        feature.capital_mix = _series_value(getattr(pid_result, "capital_mix", []), index)
+        mode_name = str(getattr(pid_result, "mode", ""))
+        if mode_name != "baseline_4d":
+            feature.capital_q = _series_value(getattr(pid_result, "capital_q", []), index)
+            feature.capital_retail = _series_value(getattr(pid_result, "capital_retail", []), index)
+            if feature.capital_q is not None:
+                feature.rule_error_q = _relative_error(feature.Q_rule_t, feature.capital_q)
+            if feature.capital_retail is not None:
+                feature.rule_error_retail = _relative_error(feature.R_seed_t, feature.capital_retail)
 
 
 def _rows_by_window(rows: list[dict]) -> dict[int, dict]:

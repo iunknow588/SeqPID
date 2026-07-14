@@ -54,7 +54,7 @@ class PIDDecomposer4D(BasePIDDecomposer):
         u_mix_prev: float,
         u_q_prev: float,
         u_retail_prev: float,
-    ) -> tuple[float, float, float]:
+    ) -> tuple[float, float, float, float]:
         c_p_t = beta_ch[t] * u_ch_prev + beta_mix[t] * u_mix_prev
         capital_mix = beta_mix[t] * u_mix_prev
         qr_abs = abs(u_q_prev) + abs(u_retail_prev)
@@ -64,4 +64,4 @@ class PIDDecomposer4D(BasePIDDecomposer):
         else:
             capital_q_t = capital_mix
             capital_retail_t = 0.0
-        return c_p_t, capital_q_t, capital_retail_t
+        return c_p_t, capital_mix, capital_q_t, capital_retail_t

@@ -21,9 +21,11 @@ from exporter import (
     export_pattern_reco,
     export_pid_tail_diagnostics,
     export_pid_daily_diag,
+    export_pid_daily_diag_records,
     export_pid_window_diag,
     export_pid_window_contrib,
     export_pid_window_params,
+    export_raw_data_quality_report,
     export_window_feature_rows,
     export_window_flow_rows,
     export_predict_result,
@@ -461,7 +463,20 @@ def _build_pid_rows_from_trades(
     return buckets
 
 
-def _build_daily_sample(symbol: str, trade_date: str, rows: list[dict]) -> DailySample:
+def _build_daily_sample(
+    symbol: str,
+    trade_date: str,
+    rows: list[dict],
+    stock_mv_meta: dict[str, float] | None = None,
+) -> DailySample:
+    meta = stock_mv_meta or {}
+    float_shares = float(meta.get("float_shares", 0.0) or 0.0)
+    if float_shares > 0:
+        for row in rows:
+            close_price = _pick(row, ["window_close_price", "close_price", "成交价"])
+            if close_price > 0:
+                row["float_shares"] = float_shares
+                row["float_mv"] = close_price * float_shares
     deal_amount = sum(_pick(row, ["deal_amount", "amount", "成交额"]) for row in rows)
     buy_amount = sum(_pick(row, ["signal_deal_buy_amount", "buy_amount", "主动买成交额", "涓诲姩涔版垚浜ら"]) for row in rows)
     sell_amount = sum(_pick(row, ["signal_deal_sell_amount", "sell_amount", "主动卖成交额", "涓诲姩鍗栨垚浜ら"]) for row in rows)
@@ -487,6 +502,7 @@ def _build_daily_sample(symbol: str, trade_date: str, rows: list[dict]) -> Daily
         "ask_pressure": sum(ask_pressure_values) / len(ask_pressure_values) if ask_pressure_values else 0.0,
         "tail_ratio": tail_amount / deal_amount if deal_amount > 0 else 0.0,
         "window_count": len(rows),
+        "float_shares": float_shares,
     }
     quality_flags = {
         "has_reference_features": True,
@@ -553,7 +569,12 @@ def _read_csv_rows(path: Path, trade_date: str) -> list[dict]:
     return []
 
 
-def _build_daily_sample_from_stock_dir(stock_dir: Path, trade_date: str, config: dict | None = None) -> DailySample | None:
+def _build_daily_sample_from_stock_dir(
+    stock_dir: Path,
+    trade_date: str,
+    config: dict | None = None,
+    stock_mv_meta: dict[str, float] | None = None,
+) -> DailySample | None:
     config = config or {}
     trade_path = stock_dir / "逐笔成交.csv"
     order_path = stock_dir / "逐笔委托.csv"
@@ -561,9 +582,14 @@ def _build_daily_sample_from_stock_dir(stock_dir: Path, trade_date: str, config:
     if not (trade_path.exists() and order_path.exists() and quote_path.exists()):
         return None
 
-    trade_rows = _read_csv_rows(trade_path, trade_date)
-    order_rows = _read_csv_rows(order_path, trade_date)
-    quote_rows = _read_csv_rows(quote_path, trade_date)
+    trade_rows, trade_quality = data_loader.read_csv_rows_with_quality(trade_path, trade_date)
+    order_rows, order_quality = data_loader.read_csv_rows_with_quality(order_path, trade_date)
+    quote_rows, quote_quality = data_loader.read_csv_rows_with_quality(quote_path, trade_date)
+    quality_reports = {
+        "trade": trade_quality,
+        "order": order_quality,
+        "quote": quote_quality,
+    }
     if not trade_rows and not quote_rows:
         return None
 
@@ -738,6 +764,15 @@ def _build_daily_sample_from_stock_dir(stock_dir: Path, trade_date: str, config:
         raw_order_age_recovered_count / raw_order_age_total_count if raw_order_age_total_count > 0 else 0.0
     )
 
+    meta = stock_mv_meta or {}
+    float_shares = float(meta.get("float_shares", 0.0) or 0.0)
+    if float_shares > 0:
+        for row in active_pid_rows:
+            close_price = float(row.get("window_close_price", 0.0) or 0.0)
+            if close_price > 0:
+                row["float_shares"] = float_shares
+                row["float_mv"] = close_price * float_shares
+
     summary = {
         "deal_amount": total_trade_amount,
         "buy_amount": max(net_direction, 0.0) * total_trade_amount,
@@ -777,11 +812,15 @@ def _build_daily_sample_from_stock_dir(stock_dir: Path, trade_date: str, config:
         "up_count_market": up_count,
         "down_count_market": down_count,
         "flat_count_market": flat_count,
+        "float_shares": float_shares,
     }
     quality_flags = {
         "has_reference_features": False,
         "window_count_ok": True,
         "source_layout": "per_stock_dirs",
+        "sample_origin": "raw",
+        "reason_code": "ok",
+        "quality_reports": quality_reports,
     }
     return DailySample(
         stock_code=symbol,
@@ -800,17 +839,28 @@ def _load_daily_samples(
     stock_universe: set[str] | None = None,
 ) -> list[DailySample]:
     config = config or {}
+    stock_mv_map = data_loader.load_stock_mv_metadata(data_loader.find_stock_basics_file(input_dir, config))
     path = data_loader.find_reference_feature_file(input_dir)
     if path is None:
         if data_loader.is_stock_dir(input_dir):
-            sample = _build_daily_sample_from_stock_dir(input_dir, trade_date, config=config)
+            sample = _build_daily_sample_from_stock_dir(
+                input_dir,
+                trade_date,
+                config=config,
+                stock_mv_meta=stock_mv_map.get(input_dir.name.upper()),
+            )
             return [sample] if sample is not None else []
         samples: list[DailySample] = []
         stock_dirs = data_loader.filter_stock_dirs(data_loader.iter_stock_dirs(input_dir), stock_universe)
         if stock_limit is not None and stock_limit > 0:
             stock_dirs = stock_dirs[:stock_limit]
         for stock_dir in stock_dirs:
-            sample = _build_daily_sample_from_stock_dir(stock_dir, trade_date, config=config)
+            sample = _build_daily_sample_from_stock_dir(
+                stock_dir,
+                trade_date,
+                config=config,
+                stock_mv_meta=stock_mv_map.get(stock_dir.name.upper()),
+            )
             if sample is not None:
                 samples.append(sample)
         return samples
@@ -829,7 +879,44 @@ def _load_daily_samples(
                 continue
             groups.setdefault(symbol, []).append(row)
 
-    return [_build_daily_sample(symbol, trade_date, rows) for symbol, rows in sorted(groups.items())]
+        return [
+            _build_daily_sample(symbol, trade_date, rows, stock_mv_meta=stock_mv_map.get(symbol.upper()))
+            for symbol, rows in sorted(groups.items())
+        ]
+
+
+def _build_raw_data_quality_rows(
+    trade_date: str,
+    stock_dir: Path,
+    quality_reports: dict[str, dict[str, object]] | None,
+) -> list[dict[str, object]]:
+    role_to_name = {
+        "trade": "逐笔成交.csv",
+        "order": "逐笔委托.csv",
+        "quote": "行情.csv",
+    }
+    rows: list[dict[str, object]] = []
+    for role, filename in role_to_name.items():
+        report = (quality_reports or {}).get(role, {})
+        rows.append(
+            {
+                "trade_date": trade_date,
+                "symbol": stock_dir.name.upper(),
+                "file_role": role,
+                "file_path": report.get("file_path", str(stock_dir / filename)),
+                "file_exists": str(bool(report.get("file_exists", False))).lower(),
+                "file_size": report.get("file_size", 0),
+                "null_byte_ratio": report.get("null_byte_ratio", 0.0),
+                "encoding_used": report.get("encoding_used", ""),
+                "header_valid": str(bool(report.get("header_valid", False))).lower(),
+                "raw_row_count": report.get("raw_row_count", 0),
+                "effective_row_count": report.get("effective_row_count", 0),
+                "quality_status": report.get("quality_status", "missing"),
+                "reason_code": report.get("reason_code", "missing_raw_file"),
+                "action": report.get("action", "impute"),
+            }
+        )
+    return rows
 
 
 
@@ -862,6 +949,7 @@ def run_daily_batch(
     sample_timings: list[dict[str, float | str]] = []
 
     incomplete_stock_dirs: dict[str, list[str]] = {}
+    raw_data_quality_rows: list[dict[str, object]] = []
     if data_loader.find_reference_feature_file(input_dir) is None and not data_loader.is_stock_dir(input_dir):
         stock_dirs = data_loader.slice_stock_dirs(
             data_loader.filter_stock_dirs(data_loader.iter_stock_dirs(input_dir), stock_universe),
@@ -875,6 +963,17 @@ def run_daily_batch(
             missing_files = data_loader.get_missing_required_files(stock_dir)
             if missing_files:
                 incomplete_stock_dirs[stock_dir.name] = missing_files
+                raw_data_quality_rows.extend(
+                    _build_raw_data_quality_rows(
+                        trade_date,
+                        stock_dir,
+                        {
+                            "trade": data_loader.read_csv_rows_with_quality(stock_dir / "逐笔成交.csv", trade_date)[1],
+                            "order": data_loader.read_csv_rows_with_quality(stock_dir / "逐笔委托.csv", trade_date)[1],
+                            "quote": data_loader.read_csv_rows_with_quality(stock_dir / "行情.csv", trade_date)[1],
+                        },
+                    )
+                )
                 percent = _stage_percent(0.0, 45.0, index, total_stock_dirs)
                 _emit_progress(progress_callback, percent, f"skipped incomplete sample {index}/{total_stock_dirs} {stock_dir.name}")
                 continue
@@ -884,6 +983,13 @@ def run_daily_batch(
             sample_build_seconds += elapsed
             if sample is not None:
                 samples.append(sample)
+                raw_data_quality_rows.extend(
+                    _build_raw_data_quality_rows(
+                        trade_date,
+                        stock_dir,
+                        getattr(sample, "quality_flags", {}).get("quality_reports"),
+                    )
+                )
                 if profile_enabled:
                     sample_timings.append(
                         {
@@ -891,6 +997,16 @@ def run_daily_batch(
                             "sample_build_seconds": _round_seconds(elapsed),
                         }
                     )
+            else:
+                trade_path = stock_dir / "逐笔成交.csv"
+                order_path = stock_dir / "逐笔委托.csv"
+                quote_path = stock_dir / "行情.csv"
+                empty_reports = {
+                    "trade": data_loader.read_csv_rows_with_quality(trade_path, trade_date)[1],
+                    "order": data_loader.read_csv_rows_with_quality(order_path, trade_date)[1],
+                    "quote": data_loader.read_csv_rows_with_quality(quote_path, trade_date)[1],
+                }
+                raw_data_quality_rows.extend(_build_raw_data_quality_rows(trade_date, stock_dir, empty_reports))
             percent = _stage_percent(0.0, 45.0, index, total_stock_dirs)
             _emit_progress(progress_callback, percent, f"built sample {index}/{total_stock_dirs} {stock_dir.name}")
     else:
@@ -971,7 +1087,39 @@ def run_daily_batch(
     pid_window_diag_path = output_dir / "pid_window_diag.csv"
     pid_daily_diag_path = output_dir / "pid_daily_diag.csv"
     export_pid_window_diag(pid_results, pid_window_diag_path, config)
-    export_pid_daily_diag(pid_results, pid_daily_diag_path, config)
+    pid_daily_diag_records: list[dict[str, object]] = []
+    daily_diag_tmp_path = output_dir / "_pid_daily_diag_raw.csv"
+    export_pid_daily_diag(pid_results, daily_diag_tmp_path, config)
+    with daily_diag_tmp_path.open("r", encoding="utf-8-sig", newline="") as fh:
+        pid_daily_diag_records.extend(list(csv.DictReader(fh)))
+    daily_diag_tmp_path.unlink(missing_ok=True)
+    for symbol in missing_symbols:
+        pid_daily_diag_records.append(
+            {
+                "trade_date": trade_date,
+                "symbol": symbol,
+                "mode_name": "imputed_market_median",
+                "data_leakage_check": "pass",
+                "param_stability_flag": "not_applicable",
+                "m_eff_uncertainty_flag": "false",
+                "m_eff_rank_eligible": "false",
+                "submission_ready": "true",
+                "sample_origin": "imputed",
+                "reason_code": "missing_raw_data_imputed",
+                "warnings": ["missing_raw_data_imputed"],
+                "warning_count": 1,
+            }
+        )
+    pid_daily_diag_records = sorted(
+        pid_daily_diag_records,
+        key=lambda item: (
+            str(item.get("symbol", "")).upper(),
+            str(item.get("sample_origin", "")),
+        ),
+    )
+    export_pid_daily_diag_records(pid_daily_diag_records, pid_daily_diag_path, config)
+    raw_data_quality_report_path = output_dir / "raw_data_quality_report.csv"
+    export_raw_data_quality_report(raw_data_quality_rows, raw_data_quality_report_path)
     export_pid_tail_diagnostics(pid_results, output_dir / "pid_tail_diagnostics.csv")
     market_snapshot_path = None
     market_report_path = None
@@ -1047,6 +1195,7 @@ def run_daily_batch(
     )
     result["pid_window_diag_path"] = str(pid_window_diag_path)
     result["pid_daily_diag_path"] = str(pid_daily_diag_path)
+    result["raw_data_quality_report_path"] = str(raw_data_quality_report_path)
     replay_validation_report_path = export_replay_validation_report(result, output_dir)
     result["replay_validation_report_path"] = replay_validation_report_path
     _emit_progress(progress_callback, 100.0, "batch analysis finished")

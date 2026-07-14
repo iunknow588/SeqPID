@@ -14,6 +14,7 @@ if str(SRC_DIR) not in sys.path:
 from exporter import (
     export_pid_tail_diagnostics,
     export_pid_daily_diag,
+    export_pid_daily_diag_records,
     export_pid_window_diag,
     build_submit_zip,
     export_batch_diagnostics,
@@ -229,6 +230,12 @@ class ExporterTest(unittest.TestCase):
             result.capital_ch[-1] = 0.12
             result.capital_q[-1] = 0.05
             result.capital_retail[-1] = 0.03
+            result.capital_mix[-1] = 0.08
+            result.price_basis[-1] = 10.0
+            result.u_ch_amount_ratio[-1] = 0.02
+            result.u_q_amount_ratio[-1] = 0.01
+            result.u_retail_amount_ratio[-1] = 0.006
+            result.u_mix_amount_ratio[-1] = 0.016
             cfg = {
                 "q_type": "window_index",
                 "u_source_type": "mv_ratio",
@@ -247,9 +254,42 @@ class ExporterTest(unittest.TestCase):
 
             self.assertIn("state_space_contract", window_rows[0])
             self.assertIn("y_hat_next", window_rows[0])
+            self.assertIn("beta_norm_ch_diag", window_rows[0])
+            self.assertIn("m_eff_source_type", window_rows[0])
             self.assertIn("data_leakage_check", daily_rows[0])
             self.assertIn("lambda_switch", daily_rows[0])
+            self.assertIn("beta_norm_unit", daily_rows[0])
             self.assertEqual(daily_rows[1][daily_rows[0].index("data_leakage_check")], "pass")
+            self.assertEqual(daily_rows[1][daily_rows[0].index("m_eff_uncertainty_flag")], "true")
+            self.assertEqual(daily_rows[1][daily_rows[0].index("m_eff_rank_eligible")], "false")
+            self.assertEqual(daily_rows[1][daily_rows[0].index("beta_norm_unit")], "amount_response")
+            self.assertEqual(daily_rows[1][daily_rows[0].index("m_eff_source_type")], "amount_ratio_proxy")
+            self.assertIn("sample_origin", daily_rows[0])
+            self.assertEqual(daily_rows[1][daily_rows[0].index("sample_origin")], "raw")
+            self.assertEqual(window_rows[-1][window_rows[0].index("beta_norm_ch_diag")], "0.6")
+            self.assertEqual(window_rows[-1][window_rows[0].index("m_eff_ch_diag")], "1.666667")
+
+    def test_export_pid_daily_diag_records_preserves_warning_string(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            export_pid_daily_diag_records(
+                [
+                    {
+                        "trade_date": "20260710",
+                        "symbol": "000001.SZ",
+                        "mode_name": "baseline_4d",
+                        "warnings": "KF did not converge",
+                        "warning_count": 1,
+                    }
+                ],
+                base / "pid_daily_diag.csv",
+                {},
+            )
+
+            with (base / "pid_daily_diag.csv").open("r", encoding="utf-8-sig", newline="") as fh:
+                rows = list(csv.reader(fh))
+
+            self.assertEqual(rows[1][rows[0].index("warnings")], "KF did not converge")
 
     def test_validate_submission_files_rejects_duplicate_stock_date(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

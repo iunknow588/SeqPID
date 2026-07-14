@@ -108,6 +108,7 @@ class StateFeature:
     c_d: float | None = None
     eps: float | None = None
     capital_ch: float | None = None
+    capital_mix: float | None = None
     capital_q: float | None = None
     capital_retail: float | None = None
     capital_ch_rule_approx: float = 0.0

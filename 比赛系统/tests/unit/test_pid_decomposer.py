@@ -123,10 +123,74 @@ class PIDDecomposerTest(unittest.TestCase):
         self.assertLessEqual(result.capital_identity_error, 1e-10)
         self.assertTrue(
             np.allclose(
-                result.capital_ch + result.capital_q + result.capital_retail,
+                result.capital_ch + result.capital_mix,
                 result.c_p,
             )
         )
+
+    def test_baseline_4d_does_not_force_quant_or_retail_structural_label(self) -> None:
+        decomposer = PIDDecomposer({})
+
+        dominant = decomposer._determine_dominant(
+            np.array([0.0, 0.1, 0.0]),
+            np.array([0.0, 0.4, 0.3]),
+            np.array([0.0, 0.2, 0.1]),
+        )
+
+        self.assertEqual(dominant["dominant_type"], "unknown")
+
+    def test_mv_ratio_requested_applies_when_float_mv_available(self) -> None:
+        sample = DailySample(
+            stock_code="000001.SZ",
+            transaction_date="20260710",
+            rows=[
+                {
+                    "window_id": "10",
+                    "deal_amount": "3000000",
+                    "signal_deal_buy_amount": "2200000",
+                    "signal_deal_sell_amount": "800000",
+                    "cb_cancel_order_ratio": "0.10",
+                    "rs_burst_ratio": "0.60",
+                    "pi_max_price_impact_pct": "0.012",
+                    "float_mv": "150000000",
+                }
+            ],
+            feature_summary={},
+        )
+        decomposer = PIDDecomposer({"u_source_type": "mv_ratio"})
+
+        result = decomposer.decompose_sample(sample)
+
+        self.assertEqual(result.u_basis_effective, "mv_ratio")
+        self.assertTrue(result.mv_ratio_input_requested)
+        self.assertTrue(result.mv_ratio_input_applied)
+        self.assertAlmostEqual(result.u_ch_mv_ratio[10], result.u_ch_amount_ratio[10] * 3000000 / 150000000, places=12)
+
+    def test_mv_ratio_requested_falls_back_without_float_mv(self) -> None:
+        sample = DailySample(
+            stock_code="000001.SZ",
+            transaction_date="20260710",
+            rows=[
+                {
+                    "window_id": "10",
+                    "deal_amount": "3000000",
+                    "signal_deal_buy_amount": "2200000",
+                    "signal_deal_sell_amount": "800000",
+                    "cb_cancel_order_ratio": "0.10",
+                    "rs_burst_ratio": "0.60",
+                    "pi_max_price_impact_pct": "0.012",
+                }
+            ],
+            feature_summary={},
+        )
+        decomposer = PIDDecomposer({"u_source_type": "mv_ratio"})
+
+        result = decomposer.decompose_sample(sample)
+
+        self.assertEqual(result.u_basis_effective, "amount")
+        self.assertTrue(result.mv_ratio_input_requested)
+        self.assertFalse(result.mv_ratio_input_applied)
+        self.assertTrue(any("mv_ratio input requested" in warning for warning in result.warnings))
 
 
 if __name__ == "__main__":

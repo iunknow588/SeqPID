@@ -132,6 +132,17 @@ const PID_WINDOW_DIAG_COLUMNS: &[&str] = &[
     "capital_q",
     "capital_retail",
     "capital_mix",
+    "beta_norm_ch_diag",
+    "beta_norm_q_diag",
+    "beta_norm_retail_diag",
+    "beta_norm_mix_diag",
+    "m_eff_ch_diag",
+    "m_eff_q_diag",
+    "m_eff_retail_diag",
+    "m_eff_mix_diag",
+    "beta_norm_unit",
+    "m_eff_source_type",
+    "m_eff_clipped_flag",
     "closure_impl_error",
     "model_residual",
     "param_stability_flag",
@@ -162,12 +173,33 @@ const PID_DAILY_DIAG_COLUMNS: &[&str] = &[
     "rule_layer_leakage_check",
     "offline_smooth_used",
     "param_stability_flag",
+    "beta_norm_unit",
+    "m_eff_source_type",
+    "m_eff_clipped_flag",
     "m_eff_uncertainty_flag",
     "m_eff_rank_eligible",
     "submission_ready",
+    "sample_origin",
+    "reason_code",
     "code_build_hash",
     "warning_count",
     "warnings",
+];
+const RAW_DATA_QUALITY_COLUMNS: &[&str] = &[
+    "trade_date",
+    "symbol",
+    "file_role",
+    "file_path",
+    "file_exists",
+    "file_size",
+    "null_byte_ratio",
+    "encoding_used",
+    "header_valid",
+    "raw_row_count",
+    "effective_row_count",
+    "quality_status",
+    "reason_code",
+    "action",
 ];
 const WINDOW_FLOW_COLUMNS: &[&str] = &["stock_code", "transaction_date", "window_id"];
 
@@ -197,6 +229,172 @@ fn row_float(row: &HashMap<String, String>, keys: &[&str], default: f64) -> f64 
         }
     }
     default
+}
+
+fn resolve_m_eff_status(_config: &serde_json::Value) -> (&'static str, &'static str) {
+    ("true", "false")
+}
+
+fn series_optional_value(values: &[f64], index: usize) -> Option<f64> {
+    values.get(index).copied().filter(|value| !value.is_nan())
+}
+
+fn proxy_beta_norm(capital_value: Option<f64>, price_basis: Option<f64>, u_ratio: Option<f64>) -> Option<f64> {
+    let capital_value = capital_value?;
+    let price_basis = price_basis?;
+    let u_ratio = u_ratio?;
+    if price_basis.abs() <= 1e-12 || u_ratio.abs() <= 1e-12 {
+        return None;
+    }
+    Some((capital_value / price_basis) / u_ratio)
+}
+
+fn proxy_m_eff(beta_norm: Option<f64>, beta_norm_floor: f64) -> (Option<f64>, bool) {
+    match beta_norm {
+        Some(value) => {
+            let clipped = value.abs() <= beta_norm_floor;
+            (Some(1.0 / value.abs().max(beta_norm_floor)), clipped)
+        }
+        None => (None, false),
+    }
+}
+
+fn format_optional_float(value: Option<f64>) -> String {
+    value
+        .map(|v| python_like_float_string(round6(v)))
+        .unwrap_or_default()
+}
+
+fn python_like_float_string(value: f64) -> String {
+    let raw = format!("{:?}", value);
+    if let Some(pos) = raw.find('e') {
+        let mantissa = &raw[..pos];
+        let exponent = &raw[pos + 1..];
+        if exponent.len() >= 2 {
+            let sign = &exponent[..1];
+            let digits = &exponent[1..];
+            if digits.len() == 1 {
+                return format!("{mantissa}e{sign}0{digits}");
+            }
+        }
+    }
+    raw
+}
+
+struct ProxyMetrics {
+    beta_norm_ch_diag: String,
+    beta_norm_q_diag: String,
+    beta_norm_retail_diag: String,
+    beta_norm_mix_diag: String,
+    m_eff_ch_diag: String,
+    m_eff_q_diag: String,
+    m_eff_retail_diag: String,
+    m_eff_mix_diag: String,
+    beta_norm_unit: String,
+    m_eff_source_type: String,
+    m_eff_clipped_flag: String,
+}
+
+fn window_diag_proxy_metrics(
+    result: &DecompositionResult,
+    window_id: usize,
+    beta_norm_floor: f64,
+) -> ProxyMetrics {
+    let price_basis = series_optional_value(&result.price_basis, window_id);
+    let components = [
+        (
+            "ch",
+            series_optional_value(&result.capital_ch, window_id),
+            series_optional_value(&result.u_ch_amount_ratio, window_id),
+        ),
+        (
+            "q",
+            series_optional_value(&result.capital_q, window_id),
+            series_optional_value(&result.u_q_amount_ratio, window_id),
+        ),
+        (
+            "retail",
+            series_optional_value(&result.capital_retail, window_id),
+            series_optional_value(&result.u_retail_amount_ratio, window_id),
+        ),
+        (
+            "mix",
+            series_optional_value(&result.capital_mix, window_id),
+            series_optional_value(&result.u_mix_amount_ratio, window_id),
+        ),
+    ];
+    let mut any_valid = false;
+    let mut any_clipped = false;
+    let mut beta_norm_ch_diag = String::new();
+    let mut beta_norm_q_diag = String::new();
+    let mut beta_norm_retail_diag = String::new();
+    let mut beta_norm_mix_diag = String::new();
+    let mut m_eff_ch_diag = String::new();
+    let mut m_eff_q_diag = String::new();
+    let mut m_eff_retail_diag = String::new();
+    let mut m_eff_mix_diag = String::new();
+    for (name, capital_value, u_ratio) in components {
+        let beta_norm = proxy_beta_norm(capital_value, price_basis, u_ratio);
+        let (m_eff, clipped) = proxy_m_eff(beta_norm, beta_norm_floor);
+        match name {
+            "ch" => {
+                beta_norm_ch_diag = format_optional_float(beta_norm);
+                m_eff_ch_diag = format_optional_float(m_eff);
+            }
+            "q" => {
+                beta_norm_q_diag = format_optional_float(beta_norm);
+                m_eff_q_diag = format_optional_float(m_eff);
+            }
+            "retail" => {
+                beta_norm_retail_diag = format_optional_float(beta_norm);
+                m_eff_retail_diag = format_optional_float(m_eff);
+            }
+            _ => {
+                beta_norm_mix_diag = format_optional_float(beta_norm);
+                m_eff_mix_diag = format_optional_float(m_eff);
+            }
+        }
+        any_valid |= beta_norm.is_some();
+        any_clipped |= clipped;
+    }
+    ProxyMetrics {
+        beta_norm_ch_diag,
+        beta_norm_q_diag,
+        beta_norm_retail_diag,
+        beta_norm_mix_diag,
+        m_eff_ch_diag,
+        m_eff_q_diag,
+        m_eff_retail_diag,
+        m_eff_mix_diag,
+        beta_norm_unit: if any_valid { "amount_response" } else { "" }.to_string(),
+        m_eff_source_type: if any_valid { "amount_ratio_proxy" } else { "unavailable" }.to_string(),
+        m_eff_clipped_flag: if any_clipped { "true" } else { "false" }.to_string(),
+    }
+}
+
+fn daily_diag_proxy_summary(result: &DecompositionResult, beta_norm_floor: f64) -> (&'static str, &'static str, &'static str) {
+    let row_count = [
+        result.price_basis.len(),
+        result.u_ch_amount_ratio.len(),
+        result.u_q_amount_ratio.len(),
+        result.u_retail_amount_ratio.len(),
+        result.u_mix_amount_ratio.len(),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    let mut any_valid = false;
+    let mut any_clipped = false;
+    for window_id in 0..row_count {
+        let metrics = window_diag_proxy_metrics(result, window_id, beta_norm_floor);
+        any_valid |= metrics.m_eff_source_type == "amount_ratio_proxy";
+        any_clipped |= metrics.m_eff_clipped_flag == "true";
+    }
+    (
+        if any_valid { "amount_response" } else { "" },
+        if any_valid { "amount_ratio_proxy" } else { "unavailable" },
+        if any_clipped { "true" } else { "false" },
+    )
 }
 
 pub fn export_pattern_reco(results: &[PatternResult], output_path: &Path) -> Result<()> {
@@ -610,7 +808,7 @@ pub fn export_pid_window_contrib(
             let capital_ch_raw = series_value_default(&result.capital_ch, window_id, 0.0);
             let c_p = round6(c_p_raw);
             let capital_ch = round6(capital_ch_raw);
-            let capital_mix = round6(c_p_raw - capital_ch_raw);
+            let capital_mix = round6(series_value_default(&result.capital_mix, window_id, c_p_raw - capital_ch_raw));
             wtr.write_record(&[
                 result.stock_code.as_str(),
                 result.transaction_date.as_str(),
@@ -666,7 +864,9 @@ pub fn export_pid_window_diag(
     let u_source_type = config_str(config, "u_source_type", "mv_ratio");
     let estimator_method = config_str(config, "estimator_method", "kalman_filter_realtime");
     let m_slow_method = config_str(config, "m_slow_method", "ewma_realtime");
+    let beta_norm_floor = config_f64(config, &["beta_norm_floor"], 1.0e-6);
     let data_leakage_check = if estimator_method.contains("offline") || m_slow_method.contains("offline") { "fail" } else { "pass" };
+    let (_m_eff_uncertainty_flag, m_eff_rank_eligible) = resolve_m_eff_status(config);
 
     let mut wtr = Writer::from_path(output_path)?;
     wtr.write_record(PID_WINDOW_DIAG_COLUMNS)?;
@@ -690,6 +890,8 @@ pub fn export_pid_window_diag(
             let capital_ch = series_value_default(&result.capital_ch, window_id, 0.0);
             let capital_q = series_value_default(&result.capital_q, window_id, 0.0);
             let capital_retail = series_value_default(&result.capital_retail, window_id, 0.0);
+            let capital_mix = series_value_default(&result.capital_mix, window_id, c_p - capital_ch);
+            let proxy_metrics = window_diag_proxy_metrics(result, window_id, beta_norm_floor);
             wtr.write_record(&[
                 result.transaction_date.as_str(),
                 result.stock_code.as_str(),
@@ -711,15 +913,26 @@ pub fn export_pid_window_diag(
                 &round6(capital_ch).to_string(),
                 &round6(capital_q).to_string(),
                 &round6(capital_retail).to_string(),
-                &round6(c_p - capital_ch).to_string(),
+                &round6(capital_mix).to_string(),
+                proxy_metrics.beta_norm_ch_diag.as_str(),
+                proxy_metrics.beta_norm_q_diag.as_str(),
+                proxy_metrics.beta_norm_retail_diag.as_str(),
+                proxy_metrics.beta_norm_mix_diag.as_str(),
+                proxy_metrics.m_eff_ch_diag.as_str(),
+                proxy_metrics.m_eff_q_diag.as_str(),
+                proxy_metrics.m_eff_retail_diag.as_str(),
+                proxy_metrics.m_eff_mix_diag.as_str(),
+                proxy_metrics.beta_norm_unit.as_str(),
+                proxy_metrics.m_eff_source_type.as_str(),
+                proxy_metrics.m_eff_clipped_flag.as_str(),
                 &format!("{:.2e}", result.pid_closure_error),
                 &round6(eps).to_string(),
                 param_stability_flag,
-                "true",
+                m_eff_rank_eligible,
                 data_leakage_check,
                 m_slow_method.as_str(),
                 "false",
-                "true",
+                m_eff_rank_eligible,
                 "true",
                 warnings.as_str(),
             ])?;
@@ -741,13 +954,16 @@ pub fn export_pid_daily_diag(
     let u_source_type = config_str(config, "u_source_type", "mv_ratio");
     let estimator_method = config_str(config, "estimator_method", "kalman_filter_realtime");
     let m_slow_method = config_str(config, "m_slow_method", "ewma_realtime");
+    let beta_norm_floor = config_f64(config, &["beta_norm_floor"], 1.0e-6);
     let offline_smooth_used = estimator_method.contains("offline") || m_slow_method.contains("offline");
     let data_leakage_check = if offline_smooth_used { "fail" } else { "pass" };
+    let (m_eff_uncertainty_flag, m_eff_rank_eligible) = resolve_m_eff_status(config);
     let mut wtr = Writer::from_path(output_path)?;
     wtr.write_record(PID_DAILY_DIAG_COLUMNS)?;
     for result in pid_results {
         let warnings = result.warnings.join(" | ");
         let param_stability_flag = if result.kf_converged && result.pid_closure_error <= 1e-7 { "pass" } else { "warn" };
+        let (beta_norm_unit, m_eff_source_type, m_eff_clipped_flag) = daily_diag_proxy_summary(result, beta_norm_floor);
         wtr.write_record(&[
             result.transaction_date.as_str(),
             result.stock_code.as_str(),
@@ -759,21 +975,103 @@ pub fn export_pid_daily_diag(
             &config.get("lookback_days").and_then(|v| v.as_i64()).unwrap_or(20).to_string(),
             config.get("zero_trade_policy").and_then(|v| v.as_str()).unwrap_or("mark_only"),
             if config_bool(config, "submission_requires_complete_windows", true) { "true" } else { "false" },
-            &config_f64(config, &["mode_switch", "lambda_switch"], 0.1).to_string(),
-            &config_f64(config, &["mode_switch", "lambda_jump"], 1.0).to_string(),
-            &config_f64(config, &["mode_switch", "lambda_error"], 10.0).to_string(),
+            &format!("{:?}", config_f64(config, &["mode_switch", "lambda_switch"], 0.1)),
+            &format!("{:?}", config_f64(config, &["mode_switch", "lambda_jump"], 1.0)),
+            &format!("{:?}", config_f64(config, &["mode_switch", "lambda_error"], 10.0)),
             data_leakage_check,
             "pass",
             "pass",
             if offline_smooth_used { "true" } else { "false" },
             param_stability_flag,
-            "false",
-            "true",
+            beta_norm_unit,
+            m_eff_source_type,
+            m_eff_clipped_flag,
+            m_eff_uncertainty_flag,
+            m_eff_rank_eligible,
             if data_leakage_check == "pass" { "true" } else { "false" },
+            "raw",
+            "ok",
             config.get("code_build_hash").and_then(|v| v.as_str()).unwrap_or(""),
             &result.warnings.len().to_string(),
             warnings.as_str(),
         ])?;
+    }
+    wtr.flush()?;
+    Ok(())
+}
+
+pub fn export_pid_daily_diag_records(
+    records: &[HashMap<String, String>],
+    output_path: &Path,
+    config: &serde_json::Value,
+) -> Result<()> {
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let q_type = config_str(config, "q_type", "window_index");
+    let u_source_type = config_str(config, "u_source_type", "mv_ratio");
+    let estimator_method = config_str(config, "estimator_method", "kalman_filter_realtime");
+    let m_slow_method = config_str(config, "m_slow_method", "ewma_realtime");
+    let (m_eff_uncertainty_flag, m_eff_rank_eligible) = resolve_m_eff_status(config);
+    let mut wtr = Writer::from_path(output_path)?;
+    wtr.write_record(PID_DAILY_DIAG_COLUMNS)?;
+    for record in records {
+        let warnings = record.get("warnings").cloned().unwrap_or_default();
+        let warning_count = record
+            .get("warning_count")
+            .cloned()
+            .unwrap_or_else(|| if warnings.is_empty() { "0".into() } else { "1".into() });
+        wtr.write_record(&[
+            record.get("trade_date").map(String::as_str).unwrap_or(""),
+            record.get("symbol").map(String::as_str).unwrap_or(""),
+            record.get("mode_name").map(String::as_str).unwrap_or(""),
+            record.get("q_type").map(String::as_str).unwrap_or(q_type.as_str()),
+            record.get("u_source_type").map(String::as_str).unwrap_or(u_source_type.as_str()),
+            record.get("estimator_method").map(String::as_str).unwrap_or(estimator_method.as_str()),
+            record.get("m_slow_method").map(String::as_str).unwrap_or(m_slow_method.as_str()),
+            record.get("lookback_days").map(String::as_str).unwrap_or("20"),
+            record.get("zero_trade_policy").map(String::as_str).unwrap_or("mark_only"),
+            record.get("submission_requires_complete_windows").map(String::as_str).unwrap_or("true"),
+            record.get("lambda_switch").map(String::as_str).unwrap_or("0.1"),
+            record.get("lambda_jump").map(String::as_str).unwrap_or("1.0"),
+            record.get("lambda_error").map(String::as_str).unwrap_or("10.0"),
+            record.get("data_leakage_check").map(String::as_str).unwrap_or("pass"),
+            record.get("feature_engineering_leakage_check").map(String::as_str).unwrap_or("pass"),
+            record.get("rule_layer_leakage_check").map(String::as_str).unwrap_or("pass"),
+            record.get("offline_smooth_used").map(String::as_str).unwrap_or("false"),
+            record.get("param_stability_flag").map(String::as_str).unwrap_or("pass"),
+            record.get("beta_norm_unit").map(String::as_str).unwrap_or(""),
+            record.get("m_eff_source_type").map(String::as_str).unwrap_or("unavailable"),
+            record.get("m_eff_clipped_flag").map(String::as_str).unwrap_or("false"),
+            record.get("m_eff_uncertainty_flag").map(String::as_str).unwrap_or(m_eff_uncertainty_flag),
+            record.get("m_eff_rank_eligible").map(String::as_str).unwrap_or(m_eff_rank_eligible),
+            record.get("submission_ready").map(String::as_str).unwrap_or("true"),
+            record.get("sample_origin").map(String::as_str).unwrap_or("raw"),
+            record.get("reason_code").map(String::as_str).unwrap_or("ok"),
+            record.get("code_build_hash").map(String::as_str).unwrap_or(""),
+            warning_count.as_str(),
+            warnings.as_str(),
+        ])?;
+    }
+    wtr.flush()?;
+    Ok(())
+}
+
+pub fn export_raw_data_quality_report(
+    rows: &[HashMap<String, String>],
+    output_path: &Path,
+) -> Result<()> {
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut wtr = Writer::from_path(output_path)?;
+    wtr.write_record(RAW_DATA_QUALITY_COLUMNS)?;
+    for row in rows {
+        let values: Vec<String> = RAW_DATA_QUALITY_COLUMNS
+            .iter()
+            .map(|key| row.get(*key).cloned().unwrap_or_default())
+            .collect();
+        wtr.write_record(values)?;
     }
     wtr.flush()?;
     Ok(())
@@ -1075,4 +1373,125 @@ pub fn export_replay_validation_report(
     }
     fs::write(&report_path, lines.join("\n"))?;
     Ok(report_path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schemas::DecompositionResult;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn pid_window_diag_prefers_explicit_capital_mix() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("opc_rust_exporter_test_{unique}"));
+        fs::create_dir_all(&base).expect("create temp dir");
+        let output = base.join("pid_window_diag.csv");
+
+        let mut result = DecompositionResult {
+            stock_code: "000001.SZ".to_string(),
+            transaction_date: "20260710".to_string(),
+            mode: "baseline_4d".to_string(),
+            kf_converged: true,
+            ..DecompositionResult::default()
+        };
+        result.c_p = vec![0.0; 48];
+        result.c_i = vec![0.0; 48];
+        result.c_d = vec![0.0; 48];
+        result.eps = vec![0.0; 48];
+        result.capital_ch = vec![0.0; 48];
+        result.capital_q = vec![0.0; 48];
+        result.capital_retail = vec![0.0; 48];
+        result.capital_mix = vec![0.0; 48];
+        result.price_basis = vec![0.0; 48];
+        result.u_ch_amount_ratio = vec![0.0; 48];
+        result.u_q_amount_ratio = vec![0.0; 48];
+        result.u_retail_amount_ratio = vec![0.0; 48];
+        result.u_mix_amount_ratio = vec![0.0; 48];
+        result.c_p[0] = 0.20;
+        result.capital_ch[0] = 0.12;
+        result.capital_mix[0] = 0.09;
+        result.price_basis[0] = 10.0;
+        result.u_ch_amount_ratio[0] = 0.02;
+        result.u_mix_amount_ratio[0] = 0.015;
+
+        export_pid_window_diag(&[&result], &output, &serde_json::json!({})).expect("export diag");
+
+        let content = fs::read_to_string(&output).expect("read csv");
+        let mut lines = content.lines();
+        let header = lines.next().unwrap_or_default();
+        let row = lines.next().unwrap_or_default();
+        let headers: Vec<&str> = header.split(',').collect();
+        let fields: Vec<&str> = row.split(',').collect();
+        let mix_idx = headers
+            .iter()
+            .position(|name| *name == "capital_mix")
+            .expect("capital_mix column");
+        let beta_idx = headers
+            .iter()
+            .position(|name| *name == "beta_norm_ch_diag")
+            .expect("beta_norm_ch_diag column");
+
+        assert_eq!(fields.get(mix_idx).copied(), Some("0.09"));
+        assert_eq!(fields.get(beta_idx).copied(), Some("0.6"));
+
+        let _ = fs::remove_file(&output);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn pid_daily_diag_defaults_to_conservative_m_eff_flags() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("opc_rust_daily_diag_test_{unique}"));
+        fs::create_dir_all(&base).expect("create temp dir");
+        let output = base.join("pid_daily_diag.csv");
+
+        let mut result = DecompositionResult {
+            stock_code: "000001.SZ".to_string(),
+            transaction_date: "20260710".to_string(),
+            mode: "baseline_4d".to_string(),
+            kf_converged: true,
+            ..DecompositionResult::default()
+        };
+        result.price_basis = vec![0.0; 48];
+        result.u_ch_amount_ratio = vec![0.0; 48];
+        result.capital_ch = vec![0.0; 48];
+        result.price_basis[0] = 10.0;
+        result.u_ch_amount_ratio[0] = 0.02;
+        result.capital_ch[0] = 0.12;
+
+        export_pid_daily_diag(&[&result], &output, &serde_json::json!({})).expect("export daily diag");
+
+        let content = fs::read_to_string(&output).expect("read csv");
+        let mut lines = content.lines();
+        let header = lines.next().unwrap_or_default();
+        let row = lines.next().unwrap_or_default();
+        let headers: Vec<&str> = header.split(',').collect();
+        let fields: Vec<&str> = row.split(',').collect();
+        let uncertainty_idx = headers
+            .iter()
+            .position(|name| *name == "m_eff_uncertainty_flag")
+            .expect("uncertainty column");
+        let eligible_idx = headers
+            .iter()
+            .position(|name| *name == "m_eff_rank_eligible")
+            .expect("eligible column");
+        let source_idx = headers
+            .iter()
+            .position(|name| *name == "m_eff_source_type")
+            .expect("source column");
+
+        assert_eq!(fields.get(uncertainty_idx).copied(), Some("true"));
+        assert_eq!(fields.get(eligible_idx).copied(), Some("false"));
+        assert_eq!(fields.get(source_idx).copied(), Some("amount_ratio_proxy"));
+
+        let _ = fs::remove_file(&output);
+        let _ = fs::remove_dir_all(&base);
+    }
 }

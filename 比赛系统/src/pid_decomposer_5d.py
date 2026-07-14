@@ -50,8 +50,9 @@ class PIDDecomposer5D(BasePIDDecomposer):
         u_mix_prev: float,
         u_q_prev: float,
         u_retail_prev: float,
-    ) -> tuple[float, float, float]:
+    ) -> tuple[float, float, float, float]:
         c_p_t = beta_ch[t] * u_ch_prev + beta_q[t] * u_q_prev + beta_retail[t] * u_retail_prev
-        capital_q_t = beta_q[t] * u_q_prev
+        capital_mix_t = capital_q_t = beta_q[t] * u_q_prev
         capital_retail_t = beta_retail[t] * u_retail_prev
-        return c_p_t, capital_q_t, capital_retail_t
+        capital_mix_t += capital_retail_t
+        return c_p_t, capital_mix_t, capital_q_t, capital_retail_t

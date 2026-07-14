@@ -92,6 +92,98 @@ fn stage_percent(start: f64, end: f64, current: usize, total: usize) -> f64 {
 }
 fn dec(b:&[u8])->String{ match std::str::from_utf8(b){Ok(t)=>t.to_string(),Err(_)=>GB18030.decode(b).0.to_string()} }
 
+fn inspect_csv_quality(path: &Path, trade_date: &str) -> (Vec<HashMap<String, String>>, HashMap<String, String>) {
+    let mut report = HashMap::new();
+    report.insert("file_path".into(), path.to_string_lossy().to_string());
+    report.insert("file_exists".into(), path.exists().to_string());
+    report.insert("file_size".into(), "0".into());
+    report.insert("null_byte_ratio".into(), "0".into());
+    report.insert("encoding_used".into(), "".into());
+    report.insert("header_valid".into(), "false".into());
+    report.insert("raw_row_count".into(), "0".into());
+    report.insert("effective_row_count".into(), "0".into());
+    report.insert("quality_status".into(), "missing".into());
+    report.insert("reason_code".into(), "missing_raw_file".into());
+    report.insert("action".into(), "impute".into());
+    if !path.exists() {
+        return (Vec::new(), report);
+    }
+
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(_) => return (Vec::new(), report),
+    };
+    let file_size = bytes.len();
+    report.insert("file_size".into(), file_size.to_string());
+    if file_size == 0 {
+        report.insert("quality_status".into(), "empty".into());
+        report.insert("reason_code".into(), "empty_raw_file".into());
+        return (Vec::new(), report);
+    }
+    let null_count = bytes.iter().filter(|b| **b == 0).count();
+    let null_ratio = null_count as f64 / file_size as f64;
+    report.insert("null_byte_ratio".into(), format!("{:.6}", null_ratio));
+    if null_count == file_size {
+        report.insert("quality_status".into(), "null_filled".into());
+        report.insert("reason_code".into(), "null_filled_raw_file".into());
+        return (Vec::new(), report);
+    }
+
+    let text = dec(&bytes);
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(&text);
+    let mut reader = ReaderBuilder::new().has_headers(true).from_reader(text.as_bytes());
+    let headers = match reader.headers() {
+        Ok(headers) => headers.iter().map(|s| s.trim().to_string()).collect::<Vec<_>>(),
+        Err(_) => {
+            report.insert("quality_status".into(), "invalid_schema".into());
+            report.insert("reason_code".into(), "invalid_raw_schema".into());
+            return (Vec::new(), report);
+        }
+    };
+    let header_valid = headers.iter().any(|header| {
+        matches!(header.as_str(), "自然日" | "date" | "trade_date" | "时间" | "time" | "成交价格" | "price")
+    }) || headers.iter().any(|header| !header.is_empty());
+    report.insert("header_valid".into(), header_valid.to_string());
+    report.insert("encoding_used".into(), "auto".into());
+    if !header_valid {
+        report.insert("quality_status".into(), "invalid_schema".into());
+        report.insert("reason_code".into(), "invalid_raw_schema".into());
+        return (Vec::new(), report);
+    }
+
+    let mut rows = Vec::new();
+    let mut raw_row_count = 0usize;
+    for rec in reader.records() {
+        let rec = match rec {
+            Ok(rec) => rec,
+            Err(_) => continue,
+        };
+        raw_row_count += 1;
+        let row = record_to_map(&headers, &rec);
+        let row_date = row
+            .get("自然日")
+            .or_else(|| row.get("date"))
+            .or_else(|| row.get("trade_date"))
+            .cloned()
+            .unwrap_or_default();
+        if !row_date.is_empty() && row_date != trade_date {
+            continue;
+        }
+        rows.push(row);
+    }
+    report.insert("raw_row_count".into(), raw_row_count.to_string());
+    report.insert("effective_row_count".into(), rows.len().to_string());
+    if rows.is_empty() {
+        report.insert("quality_status".into(), "no_effective_rows".into());
+        report.insert("reason_code".into(), "no_effective_rows".into());
+        return (Vec::new(), report);
+    }
+    report.insert("quality_status".into(), "ok".into());
+    report.insert("reason_code".into(), "ok".into());
+    report.insert("action".into(), "use_raw".into());
+    (rows, report)
+}
+
 fn scaled_price(val: f64) -> f64 {
     if val > 1000.0 { val / 10000.0 } else { val }
 }
@@ -803,9 +895,9 @@ fn build_ref(_h: &[String], ci: &HashMap<&str,usize>, rows: impl Iterator<Item=c
 }
 
 fn load_samples(inp: &Path, td: &str, sl: Option<usize>, so: usize, su: &Option<std::collections::HashSet<String>>, cfg: &ConfigMap)
-    -> (Vec<DailySample>, HashMap<String,Vec<String>>, Vec<HashMap<String,f64>>)
+    -> (Vec<DailySample>, HashMap<String,Vec<String>>, Vec<HashMap<String,f64>>, Vec<HashMap<String, String>>)
 {
-    let mut smp=Vec::new(); let mut inc=HashMap::new(); let mut stm=Vec::new();
+    let mut smp=Vec::new(); let mut inc=HashMap::new(); let mut stm=Vec::new(); let mut raw_quality_rows=Vec::new();
     if let Some(rf)=find_ref(inp) {
         if let Ok(b)=fs::read(&rf) {
             let t=dec(&b); let t=t.strip_prefix('\u{FEFF}').unwrap_or(&t);
@@ -855,7 +947,7 @@ fn load_samples(inp: &Path, td: &str, sl: Option<usize>, so: usize, su: &Option<
                 }
             }
         }
-        return (smp,inc,stm);
+        return (smp,inc,stm,raw_quality_rows);
     }
     let sd: Vec<PathBuf>=filt(iter_stock_dirs(inp),su).into_iter().skip(so).take(sl.unwrap_or(usize::MAX)).collect();
     let total=sd.len();
@@ -863,9 +955,37 @@ fn load_samples(inp: &Path, td: &str, sl: Option<usize>, so: usize, su: &Option<
     for (idx,d) in sd.iter().enumerate() {
         let ms=miss(d);
         let name=d.file_name().unwrap().to_string_lossy().to_string();
+        let trade_quality = inspect_csv_quality(&d.join("\u{9010}\u{7b14}\u{6210}\u{4ea4}.csv"), td).1;
+        let order_quality = inspect_csv_quality(&d.join("\u{9010}\u{7b14}\u{59d4}\u{6258}.csv"), td).1;
+        let quote_quality = inspect_csv_quality(&d.join("\u{884c}\u{60c5}.csv"), td).1;
+        for (file_role, report) in [("trade", &trade_quality), ("order", &order_quality), ("quote", &quote_quality)] {
+            let mut row = HashMap::new();
+            row.insert("trade_date".into(), td.into());
+            row.insert("symbol".into(), name.to_uppercase());
+            row.insert("file_role".into(), file_role.into());
+            row.insert("file_path".into(), report.get("file_path").cloned().unwrap_or_default());
+            row.insert("file_exists".into(), report.get("file_exists").cloned().unwrap_or_default());
+            row.insert("file_size".into(), report.get("file_size").cloned().unwrap_or_default());
+            row.insert("null_byte_ratio".into(), report.get("null_byte_ratio").cloned().unwrap_or_default());
+            row.insert("encoding_used".into(), report.get("encoding_used").cloned().unwrap_or_default());
+            row.insert("header_valid".into(), report.get("header_valid").cloned().unwrap_or_default());
+            row.insert("raw_row_count".into(), report.get("raw_row_count").cloned().unwrap_or_default());
+            row.insert("effective_row_count".into(), report.get("effective_row_count").cloned().unwrap_or_default());
+            row.insert("quality_status".into(), report.get("quality_status").cloned().unwrap_or_default());
+            row.insert("reason_code".into(), report.get("reason_code").cloned().unwrap_or_default());
+            row.insert("action".into(), report.get("action").cloned().unwrap_or_default());
+            raw_quality_rows.push(row);
+        }
         if !ms.is_empty(){
             inc.insert(name.clone(),ms);
             progress(stage_percent(0.0,45.0,idx+1,total), &format!("skipped incomplete sample {}/{} {}", idx+1, total, name));
+            continue;
+        }
+        let trade_ok = trade_quality.get("quality_status").map(|v| v == "ok").unwrap_or(false);
+        let quote_ok = quote_quality.get("quality_status").map(|v| v == "ok").unwrap_or(false);
+        if !trade_ok && !quote_ok {
+            inc.insert(name.clone(), vec!["no_effective_rows".into()]);
+            progress(stage_percent(0.0,45.0,idx+1,total), &format!("skipped empty sample {}/{} {}", idx+1, total, name));
             continue;
         }
         let st=Instant::now();
@@ -883,7 +1003,7 @@ fn load_samples(inp: &Path, td: &str, sl: Option<usize>, so: usize, su: &Option<
         let mut t2=HashMap::new(); t2.insert("sample_build_seconds".into(),rsec(el)); stm.push(t2);
         progress(stage_percent(0.0,45.0,idx+1,total), &format!("built sample {}/{} {}", idx+1, total, sym));
     }
-    (smp,inc,stm)
+    (smp,inc,stm,raw_quality_rows)
 }
 
 fn sort_ord<T>(r: &mut [T], req: &Option<Vec<String>>, kf: impl Fn(&T)->String) {
@@ -983,7 +1103,7 @@ pub fn run_daily_batch(td: &str, inp: &Path, out: &Path, cfg: &ConfigMap, ld: &C
     let (req,su)=load_universe(slf)?;
     let mut w: Vec<String>=Vec::new(); let mut ms=0.0f64;
     let t1=Instant::now();
-    let (mut smp,inc,stm)=load_samples(inp,td,sl,so,&su,cfg);
+    let (mut smp,inc,stm,raw_quality_rows)=load_samples(inp,td,sl,so,&su,cfg);
     let sbs=t1.elapsed().as_secs_f64();
     progress(45.0, &format!("loaded samples {}", smp.len()));
     if smp.is_empty(){w.push("No samples.".into());}
@@ -1052,7 +1172,48 @@ pub fn run_daily_batch(td: &str, inp: &Path, out: &Path, cfg: &ConfigMap, ld: &C
     let pid_daily_diag_path = out.join("pid_daily_diag.csv");
     let cfg_json = serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null);
     exporter::export_pid_window_diag(&pid_tail_rows, &pid_window_diag_path, &cfg_json)?;
-    exporter::export_pid_daily_diag(&pid_tail_rows, &pid_daily_diag_path, &cfg_json)?;
+    let raw_pid_daily_diag_path = out.join("_pid_daily_diag_raw.csv");
+    exporter::export_pid_daily_diag(&pid_tail_rows, &raw_pid_daily_diag_path, &cfg_json)?;
+    let mut pid_daily_diag_records: Vec<HashMap<String, String>> = Vec::new();
+    if let Ok(mut rdr) = csv::Reader::from_path(&raw_pid_daily_diag_path) {
+        let headers: Vec<String> = rdr
+            .headers()
+            .map(|h| h.iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        for rec in rdr.records() {
+            let rec = match rec {
+                Ok(rec) => rec,
+                Err(_) => continue,
+            };
+            pid_daily_diag_records.push(record_to_map(&headers, &rec));
+        }
+    }
+    let _ = fs::remove_file(&raw_pid_daily_diag_path);
+    for symbol in &missing_symbols {
+        let mut record = HashMap::new();
+        record.insert("trade_date".into(), td.into());
+        record.insert("symbol".into(), symbol.clone());
+        record.insert("mode_name".into(), "imputed_market_median".into());
+        record.insert("data_leakage_check".into(), "pass".into());
+        record.insert("param_stability_flag".into(), "not_applicable".into());
+        record.insert("m_eff_uncertainty_flag".into(), "false".into());
+        record.insert("m_eff_rank_eligible".into(), "false".into());
+        record.insert("submission_ready".into(), "true".into());
+        record.insert("sample_origin".into(), "imputed".into());
+        record.insert("reason_code".into(), "missing_raw_data_imputed".into());
+        record.insert("warnings".into(), "missing_raw_data_imputed".into());
+        record.insert("warning_count".into(), "1".into());
+        pid_daily_diag_records.push(record);
+    }
+    pid_daily_diag_records.sort_by(|a, b| {
+        a.get("symbol")
+            .cloned()
+            .unwrap_or_default()
+            .cmp(&b.get("symbol").cloned().unwrap_or_default())
+    });
+    exporter::export_pid_daily_diag_records(&pid_daily_diag_records, &pid_daily_diag_path, &cfg_json)?;
+    let raw_data_quality_report_path = out.join("raw_data_quality_report.csv");
+    exporter::export_raw_data_quality_report(&raw_quality_rows, &raw_data_quality_report_path)?;
     exporter::export_pid_tail_diagnostics(&pid_tail_rows, &out.join("pid_tail_diagnostics.csv"))?;
     let mut msp: Option<String>=None; let mut mrp: Option<String>=None;
     if let Some(ref sn)=msn {
@@ -1112,6 +1273,7 @@ pub fn run_daily_batch(td: &str, inp: &Path, out: &Path, cfg: &ConfigMap, ld: &C
     r.insert("distribution_csv_path".into(),serde_json::Value::String(dc));
     r.insert("pid_window_diag_path".into(),serde_json::Value::String(pid_window_diag_path.to_string_lossy().to_string()));
     r.insert("pid_daily_diag_path".into(),serde_json::Value::String(pid_daily_diag_path.to_string_lossy().to_string()));
+    r.insert("raw_data_quality_report_path".into(),serde_json::Value::String(raw_data_quality_report_path.to_string_lossy().to_string()));
     let market_validation_report_path = exporter::export_market_pid_validation_report(msn.as_ref(), out)?;
     r.insert("market_validation_report_path".into(), serde_json::Value::String(market_validation_report_path));
     let replay_payload = serde_json::to_value(&r).unwrap_or(serde_json::Value::Null);
