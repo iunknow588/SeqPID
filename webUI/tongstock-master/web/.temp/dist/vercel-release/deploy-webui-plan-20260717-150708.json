@@ -1,0 +1,20 @@
+﻿{
+    "projectName":  "tongstock-web",
+    "projectDir":  "E:\\2026OPC大赛\\自动化交易\\webUI\\tongstock-master\\web",
+    "envFile":  "E:\\2026OPC大赛\\自动化交易\\scripts\\vercel\\.env",
+    "execute":  false,
+    "prod":  false,
+    "build":  false,
+    "syncEnv":  false,
+    "smoke":  false,
+    "smokeApi":  false,
+    "apiBaseUrl":  "",
+    "deployRetries":  2,
+    "command":  [
+                    "vercel",
+                    "deploy",
+                    "--yes"
+                ],
+    "customDomain":  null,
+    "preparedAt":  "2026-07-17T07:07:08.1481147Z"
+}

@@ -31,6 +31,11 @@ class PatternResult:
     pattern_explanation: str
     pattern_score: float = 0.0
     prototype_id: str = ""
+    pattern_primary_score: float = 0.0
+    pattern_second_score: float = 0.0
+    pattern_margin: float = 0.0
+    pattern_source: str = ""
+    pattern_pid_adjusted: bool = False
 
 
 @dataclass

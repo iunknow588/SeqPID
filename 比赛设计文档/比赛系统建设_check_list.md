@@ -1,12 +1,12 @@
 # 天池赛题一：比赛系统建设 Check List
 
-**版本：** V1.8  
-**日期：** 2026-07-14  
+**版本：** V2.0  
+**日期：** 2026-07-17  
 **文档定位：** 重构准备与实现闭环核对版  
 **适用范围：**
 
 - `比赛概要设计说明书.md` V1.6
-- `比赛详细设计说明书.md` V1.7
+- `比赛详细设计说明书.md` V1.9
 - `PID算法与实现.md`
 - `统一资金类型判断规范.md` V1.1
 - `金融领域的物理学概念模型.md`
@@ -16,7 +16,7 @@
 
 ## 0. 本轮修正结论
 
-当前系统已具备可运行基线，但代码结构仍是“可提交优先”的形态：`scheduler.py` 承载了数据读取、窗口聚合、样本构建、缺失补位、调度导出等多类职责；PID 分解层现已按“入口选择器 + shared 公共骨架 + 4D 独立实现 + 5D 独立实现”拆分，但周边文档、清单和少量调用说明仍需收口到同一口径。
+当前系统已具备可运行基线，但代码结构仍是“可提交优先”的形态：`scheduler.py` 承载了数据读取、窗口聚合、样本构建、缺失补位、调度导出等多类职责；PID 分解层现已按“入口选择器 + shared 公共骨架 + 4D 独立实现 + 5D 独立实现”拆分，Task 1 也已收口为五类资金运行模式检测器，并新增“结构化摘要 -> 解释模板 -> 提交句”的解释生成口径，但周边代码、报告和验证清单仍需继续统一。
 
 本轮后续重构目标不是推翻基线，而是把现有能力拆成与 V1.4 详细设计一致的模块边界，并优先保证：
 
@@ -25,7 +25,7 @@
 3. 规则/PID 口径统一：`CH_rule / Q_rule / R_seed` 只作为规则流，`capital_ch / capital_q / capital_retail` 只来自 PID 外力贡献 `beta_* U_*`。
 4. `phi / theta` 只作为系统响应与状态诊断，不反解为某一类资金身份。
 5. 默认稳健运行态为 `baseline_4d`，5 维模式仅在输入质量、D 项有效性与可辨识性验证通过后启用。
-6. 先做低风险模块拆分，再做弱监督模型和聚类原型库升级。
+6. 先做低风险模块拆分，再做弱监督模型和 Task 1 模式检测稳定性补强。
 7. 理论口径现已定版：成交量窗口可视为离散交易时间 `q`，价格为 `P_state(q)`；`P_wv_window` 仅作成交量域诊断，实时状态和提交使用 `P_state`。
 8. 观测差分 `y_t / v_q,t` 与预测值 `y_hat_t+1|t / v_hat_q,t+1|t` 必须分字段保存。
 9. 实时路径只允许使用先验/滤波量；RTS、HP 和全样本平滑只用于离线复盘。
@@ -35,6 +35,7 @@
 13. 双域映射和 `kappa_t` 只作诊断；零成交、薄成交或 `domain_mapping_valid_flag = false` 时不得进入排名或正式标签判断。
 14. `baseline_4d` 的正式结构化外力输出是 `capital_ch / capital_mix`；若展示 `capital_q / capital_retail`，必须标记为诊断分摊近似。
 15. 48 个基础窗口的理论依据必须统一写明为“A 股连续竞价 240 分钟 / 5 分钟粒度”。
+16. `pattern_explanation` 必须由结构化摘要和模板生成，提交文件只保留短句，不输出完整分析链路。
 
 ---
 
@@ -52,11 +53,13 @@
 - 概要、详细和建设清单必须同步写明标准状态空间三式、模式切换 `lambda` 范围、流动性分组可比性和薄成交窗口降级。
 - Jury 稳定性描述必须统一区分“完整冻结窗口判据”“快速启发式筛查”和“时变参数滚动诊断”三层口径。
 - `m_slow_method` 的默认优先级必须解释为工程稳健性排序，不能写成理论最优性结论。
+- Task 1 解释生成必须统一为“概要 / 细节 / 结论压缩”三段式，再渲染为 `pattern_explanation`。
+- `pattern_explanation` 必须能近似反推 `capital_type` 与 `pattern_type`，但不得新增提交字段。
 
 | 检查项 | 目标状态 | 当前状态 | 下一步 |
 |---|---|---|---|
 | 比赛概要设计版本 | V1.6 | `已更新` | 已对齐 PID/物理模型和实时/离线边界 |
-| 比赛详细设计版本 | V1.7 | `已更新` | 已补观测预测分离、诊断字段、泄漏和稳定性验收 |
+| 比赛详细设计版本 | V1.9 | `已更新` | 已补观测预测分离、诊断字段、泄漏和稳定性验收 |
 | PID 算法与实现 | V1.8 口径 | `已对齐` | 已补状态层级、Jury 判据和 4D 诊断分摊边界 |
 | 资金类型判断规范 | V1.1 | `已确认` | 作为规则层主依据 |
 | PID 原理与实现 | V1.1 | `已确认` | 作为结构反解主依据 |
@@ -68,6 +71,7 @@
 | 输出目录规则 | `output/交易日_时间戳/` | `已实现` | 保持 |
 | 股票清单模式 | 支持 100 股清单过滤与排序 | `已实现` | 加回放验收 |
 | 缺失股票补位 | 名单股票缺失原始数据时补默认行并告警 | `已实现` | 加专项测试 |
+| Task 1 解释模板 | 结构化摘要 + 模板短句 | `设计已补充` | 补代码实现与模板测试 |
 
 ---
 
@@ -85,12 +89,13 @@
 | PID 公共骨架 | `src/pid_decomposer_shared.py` | `已完成` | 维护共享逻辑与诊断 |
 | PID-4D 实现 | `src/pid_decomposer_4d.py` | `已完成` | 独立维护 `baseline_4d` |
 | PID-5D 实现 | `src/pid_decomposer_5d.py` | `已完成` | 独立维护 `diag_5d / full_5d` |
-| Task 1 基线 | `src/pattern_model.py` | `规则基线已完成` | P2 升级原型库 |
+| Task 1 基线 | `src/pattern_model.py` | `五类模式检测器已完成` | P2 做阈值/解释/稳定性细化 |
 | Task 2 基线 | `src/capital_model.py` | `规则/PID 基线已完成` | P2 升级弱监督/监督模型 |
 | 市场 PID | `src/market_pid.py` | `基线已完成` | P1 校验市场口径 |
 | 导出 | `src/exporter.py` | `已完成` | 保持字段兼容 |
 | 数据结构 | `src/schemas.py` | `已初步扩展` | 已增加 StateFeature/规则事件结构，后续随 PID 字段统一继续补充 |
 | PID 诊断导出 | `src/exporter.py` / `src/schemas.py` | `设计待落地` | 增加窗口级/日级诊断字段与提交阻断状态 |
+| Task 1 解释渲染 | `src/pattern_model.py` | `模板设计已冻结，代码待细化` | 输出结构化摘要并按模板生成提交短句 |
 
 ### 2.2 设计要求但尚未独立成模块
 
@@ -188,8 +193,10 @@
 | 任务 | 目标文件 | 验收标准 | 状态 |
 |---|---|---|---|
 | 将 `capital_model.py` 从规则基线升级为弱监督/监督模型 | `src/capital_model.py` | 保留规则兜底；模型输出包含置信度和解释字段 | `待执行` |
-| 将 `pattern_model.py` 从规则基线升级为聚类原型库 | `src/pattern_model.py` | 支持离线原型训练 + 在线最近原型归类 + 低置信回退 | `待执行` |
-| 增加原型库版本管理 | `models/pattern_prototypes/` | 输出 `prototype_id` 与版本号 | `待执行` |
+| 优化 `pattern_model.py` 的模式阈值与解释稳定性 | `src/pattern_model.py` | 保持五类模式口径不变，提升边界样本一致性 | `待执行` |
+| 落地 Task 1 结构化解释摘要 | `src/pattern_model.py` / `src/schemas.py` | 生成 `pattern_type / capital_type / time_bucket / flow_style / order_size_style / price_effect` 中间摘要 | `待执行` |
+| 落地 `pattern_explanation` 模板渲染 | `src/pattern_model.py` | 根据模板表生成接近官方样例的提交短句 | `待执行` |
+| 补充 Task 1 规则证据版本管理 | `configs/label_dict.yaml` / `reports/validation/` | 输出提交标签与种子标签的版本说明 | `待执行` |
 | 增加弱监督种子生成报告 | `reports/validation/weak_supervision_seed_report.md` | 明确种子规则、覆盖率、噪声风险 | `待执行` |
 
 ---
@@ -209,7 +216,8 @@
 | 单元测试 | 当前测试全部通过 | `已完成` | 每步重构后运行 |
 | 集成测试 | 真实样本全链路回放 | `已完成` | 20260707 默认 100 股样本已完成回放，后续可扩展多日回放 |
 | 性能测试 | 全市场切片耗时基准 | `部分完成` | `--profile` 可输出性能摘要，真实全市场基准待补 |
-| 稳定性报告 | 聚类/分类多日稳定性 | `未完成` | P2 后补 |
+| 稳定性报告 | 模式/分类多日稳定性 | `未完成` | P2 后补 |
+| 解释模板一致性 | 官方样例风格与字段长度 | `未完成` | P2 后补 |
 
 建议新增测试：
 
@@ -224,6 +232,8 @@
 9. `test_pid_state_space_contract.py`：验证 `psi_t|t-1 / psi_t|t / y_t / y_hat_t+1|t` 时间戳和字段边界。
 10. `test_mode_switch_lambda_config.py`：验证模式切换 lambda、滞回窗口和日内切换上限训练前固定。
 11. `test_liquidity_comparability.py`：验证流动性分组、跨股可比标记和薄成交窗口降级。
+12. `test_pattern_explanation_template.py`：验证结构化摘要可渲染为官方样例风格短句。
+13. `test_pattern_explanation_consistency.py`：验证解释短句可反推 `capital_type / pattern_type`，且不新增提交字段。
 
 ---
 
@@ -265,8 +275,9 @@
 ### 阶段 E：模型升级
 
 1. 升级 `capital_model.py` 弱监督/监督模型。
-2. 升级 `pattern_model.py` 聚类原型库。
-3. 增加模型版本、原型库版本和稳定性报告。
+2. 优化 `pattern_model.py` 五类模式检测器的阈值、证据与边界样本。
+3. 落地 `pattern_explanation` 结构化摘要和模板渲染。
+4. 增加模型版本、规则版本、解释模板版本和稳定性报告。
 
 ---
 
@@ -284,10 +295,11 @@
 
 1. `scheduler.py` 职责过重，是本轮重构第一优先级。
 2. 规则层三类流尚未作为独立模块显式存在。
-3. PID 输出仍保留历史兼容字段，需要与 V1.7 详细设计和最新算法口径完全对齐。
+3. PID 输出仍保留历史兼容字段，需要与 V1.9 详细设计和最新算法口径完全对齐。
 4. `StateFeature` 已落成独立生成器，后续重点转为观测/预测字段、稳定性和泄漏校验。
 5. schema 冻结报告、市场口径报告、100 股回放报告尚未成套交付。
 6. PID 窗口级/日级诊断文件和运行时方法白名单仍需落地。
+7. Task 1 解释模板仍停留在设计层，代码需要输出结构化摘要并统一渲染提交短句。
 
 ### 8.3 不建议立即做的事
 
@@ -306,6 +318,7 @@
 | V1.7 | 2026-07-13 | 对齐 PID/金融物理模型最新口径，补充观测预测分离、稳定性回退、等效质量不确定性、防泄漏审计与诊断交付物 |
 | V1.9 | 2026-07-14 | 吸收评审结论并补齐诊断验收件，新增 `pid_window_diag_contract.md / leakage_audit_report.md / pid_stability_report.md`，同步 `m_eff` 诊断代理状态 |
 | V1.8 | 2026-07-13 | 同步状态空间三式、模式切换 lambda、流动性可比性、薄成交窗口和 `m_slow` 工程优先级检查 |
+| V2.0 | 2026-07-17 | 补充 Task 1 解释模板链路，明确结构化摘要到提交短句的验收与实现任务 |
 
 ---
 
@@ -331,5 +344,50 @@
 3. 然后做阶段 C：对齐 PID selector/shared/4D/5D 链路与 `StateFeature`。
 4. 最后推进原选中任务：
    - 将 `capital_model.py` 从规则基线升级为弱监督/监督模型。
-   - 将 `pattern_model.py` 从规则基线升级为聚类原型库。
+   - 将 `pattern_model.py` 的五类模式检测器继续做阈值、证据和稳定性补强。
+   - 将 `pattern_explanation` 改为结构化摘要和模板渲染输出。
    - 增加集成测试、性能测试与 100 股样本回放报告。
+---
+
+## 11. 2026-07-17 本轮补充落地记录
+
+### 11.1 Task 1 模式解释链路状态
+
+本轮将 `pattern_explanation` 从“设计待落地”推进为“Python / Rust 双版本已实现并具备回归测试”的状态。当前提交字段仍保持不变：
+
+1. `pattern_reco.csv` 仍只输出 `stock_code / transaction_date / pattern_type / pattern_explanation`。
+2. 不新增结构化摘要字段，结构化摘要仅作为内部中间层使用。
+3. `pattern_explanation` 由 `pattern_type / capital_type / capital_intention / time_bucket / flow_style / order_size_style / price_effect / template_key` 推导生成。
+4. 输出短句采用“概要标签 + 行为细节 + 资金结论暗示”的压缩口径，可近似反推主导资金类型。
+
+### 11.2 已完成代码项
+
+| 项目 | Python 版本 | Rust 版本 | 验收状态 |
+|---|---|---|---|
+| 五类模式打分与 PID 修正 | `src/pattern_model.py` 已实现 | `src/pattern_model.rs` 已同步 | 已验证 |
+| 结构化解释摘要生成 | `_build_explanation_summary()` 已实现 | `build_explanation_summary()` 已实现 | 已验证 |
+| 解释模板渲染 | `_render_explanation_summary()` 已实现 | `render_explanation_summary()` 已实现 | 已验证 |
+| 官方样例风格短句 | 已覆盖 `尾盘突袭 / 大单吸筹 / 散户博弈 / 量化T0 / 日内套利` | 已同步模板 | 已验证 |
+| 模板回归测试 | 并入 `test_pattern_model.py` | `pattern_model.rs` 内置单测 | 已验证 |
+
+### 11.3 新增验收项
+
+- [x] Python `pattern_model.py` 可编译。
+- [x] Python `test_pattern_model.py` 覆盖解释模板短句与资金类型暗示。
+- [x] Rust `pattern_model.rs` 与 Python 保持同口径模板链路。
+- [x] Rust `cargo test` 覆盖解释模板生成路径。
+- [x] 输出文件名、主入口和提交 CSV 字段保持不变。
+
+### 11.4 后续仍需推进
+
+- [ ] 将解释模板版本号写入模型配置或报告，便于 A/B 回放对比。
+- [ ] 对 14 种基础买卖组合补充样本生成器，作为 `pattern_type` 解释稳定性测试集。
+- [x] 对“早盘买入 / 持续买入 / 尾盘买入 / 大单扫货 / 小单扩散 / 间歇脉冲”等执行方式补充模板化解释分支。
+- [ ] 将 Python 与 Rust 的 `pattern_explanation` 样本输出做逐行对齐报告。
+
+### 11.5 修订记录补充
+
+| 版本 | 日期 | 说明 |
+|---|---|---|
+| V2.1 | 2026-07-17 | 完成 Task 1 结构化解释摘要与模板渲染的 Python / Rust 双版本落地，新增模板与一致性回归测试。 |
+| V2.2 | 2026-07-17 | 补充执行方式层解释分支，覆盖早盘、尾盘、大单、小单、间歇和突击等提交短句特征，并同步 Python / Rust 测试。 |

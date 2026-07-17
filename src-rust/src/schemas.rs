@@ -30,6 +30,11 @@ pub struct PatternResult {
     pub pattern_explanation: String,
     pub pattern_score: f64,
     pub prototype_id: String,
+    pub pattern_primary_score: f64,
+    pub pattern_second_score: f64,
+    pub pattern_margin: f64,
+    pub pattern_source: String,
+    pub pattern_pid_adjusted: bool,
 }
 
 #[derive(Debug, Clone, Default)]

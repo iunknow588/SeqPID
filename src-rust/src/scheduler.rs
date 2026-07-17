@@ -51,7 +51,17 @@ fn looks_like_stock(v: &str) -> bool {
 fn load_universe(f: Option<&Path>) -> Result<(Option<Vec<String>>, Option<std::collections::HashSet<String>>)> {
     let p = match f { Some(p)=>p, None=>return Ok((None,None)) };
     if !p.exists() { anyhow::bail!("not found: {}",p.display()); }
-    let c_raw = fs::read_to_string(p)?;
+    let bytes = fs::read(p)?;
+    let c_raw = match String::from_utf8(bytes.clone()) {
+        Ok(text) => text,
+        Err(_) => {
+            let (text, _, had_errors) = GB18030.decode(&bytes);
+            if had_errors {
+                anyhow::bail!("failed to decode stock list file: {}", p.display());
+            }
+            text.into_owned()
+        }
+    };
     let c = c_raw.strip_prefix('\u{FEFF}').unwrap_or(&c_raw);
     let mut ord = Vec::new(); let mut set = std::collections::HashSet::new();
     for (i,l) in c.lines().enumerate() {

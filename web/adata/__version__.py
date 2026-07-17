@@ -16,7 +16,7 @@ def generate_version(version, prerelease=None, revision=None):
 
 __title__ = "adata"
 __description__ = "A Data,A Stock,ETF,Bond,Quant,Stock Market,K Line"
-__url__ = "https://github.com/1nchaos/adata"
+__url__ = ""
 __version__ = generate_version(VERSION, prerelease=PRERELEASE, revision=REVISION)
 __author__ = "1nchaos"
 __author_email__ = "9527@1nchaos.com"

@@ -6,7 +6,7 @@
   </a>
 </p>
 
-![GitHub language count](https://img.shields.io/github/languages/count/1nchaos/adata)![GitHub top language](https://img.shields.io/github/languages/top/1nchaos/adata)[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/adata?color=d)](https://pypi.org/project/adata/)[![Licence](https://img.shields.io/hexpm/l/apa?color=d)](https://gitee.com/inchaos/adata/blob/main/LICENSE)[![Downloads](https://static.pepy.tech/badge/adata/week)](https://pepy.tech/project/adata)![GitHub Repo stars](https://img.shields.io/github/stars/1nchaos/adata)![GitHub issues](https://img.shields.io/github/issues/1nchaos/adata)![GitHub contributors](https://img.shields.io/github/contributors/1nchaos/adata)![GitHub (Pre-)Release Date](https://img.shields.io/github/release-date-pre/1nchaos/adata)[![Downloads](https://static.pepy.tech/badge/adata)](https://pepy.tech/project/adata)![PyPI - Version](https://img.shields.io/pypi/v/adata)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/adata?color=d)](https://pypi.org/project/adata/)[![Licence](https://img.shields.io/hexpm/l/apa?color=d)](https://gitee.com/inchaos/adata/blob/main/LICENSE)[![Downloads](https://static.pepy.tech/badge/adata/week)](https://pepy.tech/project/adata)[![Downloads](https://static.pepy.tech/badge/adata)](https://pepy.tech/project/adata)![PyPI - Version](https://img.shields.io/pypi/v/adata)
 
 
 
@@ -280,10 +280,10 @@ print(res_df)
 
 > 对于项目有支持，包括但不仅限：内容贡献，bug提交，思想交流等等，对项目有影响的个人和机构
 
-| Simon                                     | [bigbigbigfish](https://github.com/bigbigbigfish) | [LuneZ99](https://github.com/LuneZ99)         | 匿名用户 | thue                                    | [Triones009](https://github.com/Triones009) |
+| Simon                                     | bigbigbigfish                                     | LuneZ99                                      | 匿名用户 | thue                                    | Triones009                                  |
 | ----------------------------------------- | ------------------------------------------------- | --------------------------------------------- | -------- | --------------------------------------- | ------------------------------------------- |
-| [yxm0513](https://github.com/yxm0513)     | [hanxuanliang](https://github.com/hanxuanliang)   | [akihara-sam](https://github.com/akihara-sam) | Andy     | [baei2048](https://github.com/baei2048) | [zpsakura](https://github.com/zpsakura)     |
-| [Lorry1123](https://github.com/Lorry1123) | 多维人格                                          | xmoney                                        |          |                                         |                                             |
+| yxm0513                                   | hanxuanliang                                      | akihara-sam                                   | Andy     | baei2048                                | zpsakura                                    |
+| Lorry1123                                 | 多维人格                                          | xmoney                                        |          |                                         |                                             |
 
 ----------------------------------------------------------------------
 
@@ -306,4 +306,3 @@ print(res_df)
 - 扫码关注向阳花策略，不定期分享量化的知识，一起实盘量化切磋；
 - 创始交流群和公众号都是近期建立，意在提供一个交流的平台，欢迎讨论交流；
 - 一起保卫3000点直到突破6124点。
-

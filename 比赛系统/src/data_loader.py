@@ -61,20 +61,31 @@ def load_stock_universe(stock_list_file: str | Path | None) -> tuple[list[str] |
 
     ordered_symbols: list[str] = []
     symbols: set[str] = set()
-    with path.open("r", encoding="utf-8-sig", newline="") as fh:
-        reader = csv.reader(fh)
-        for row_index, row in enumerate(reader):
-            if not row:
-                continue
-            symbol = str(row[0]).strip()
-            if not symbol:
-                continue
-            if row_index == 0 and not looks_like_stock_symbol(symbol):
-                continue
-            normalized = symbol.upper()
-            if normalized not in symbols:
-                ordered_symbols.append(normalized)
-                symbols.add(normalized)
+    last_error: Exception | None = None
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            with path.open("r", encoding=encoding, newline="") as fh:
+                reader = csv.reader(fh)
+                for row_index, row in enumerate(reader):
+                    if not row:
+                        continue
+                    symbol = str(row[0]).strip()
+                    if not symbol:
+                        continue
+                    if row_index == 0 and not looks_like_stock_symbol(symbol):
+                        continue
+                    normalized = symbol.upper()
+                    if normalized not in symbols:
+                        ordered_symbols.append(normalized)
+                        symbols.add(normalized)
+            return ordered_symbols, symbols
+        except UnicodeDecodeError as exc:
+            ordered_symbols.clear()
+            symbols.clear()
+            last_error = exc
+            continue
+    if last_error is not None:
+        raise last_error
     return ordered_symbols, symbols
 
 

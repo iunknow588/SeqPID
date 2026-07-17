@@ -1,0 +1,18 @@
+﻿{
+    "projectName":  "tongstock-web",
+    "localProjectName":  "",
+    "projectDir":  "E:\\2026OPC大赛\\自动化交易\\webUI\\tongstock-master\\web",
+    "execute":  false,
+    "prod":  false,
+    "build":  false,
+    "preflight":  false,
+    "syncEnv":  false,
+    "deployRetries":  2,
+    "command":  [
+                    "vercel",
+                    "deploy",
+                    "--yes"
+                ],
+    "customDomain":  "",
+    "preparedAt":  "2026-07-17T06:48:16.7795517Z"
+}
